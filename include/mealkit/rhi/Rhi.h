@@ -33,6 +33,7 @@ struct GpuInfo {
     u32 waveLaneCountMin = 0;
     u32 waveLaneCountMax = 0;
     bool uma = false; // 내장 그래픽처럼 CPU와 메모리를 같이 쓴다
+    std::string unsupported; // 백엔드가 확인한 최소 사양 부족 (Vulkan 버전·기능). 비면 없음
 };
 
 // 최소 사양에 못 미치는 이유. 맞으면 빈 문자열.

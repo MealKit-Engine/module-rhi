@@ -85,11 +85,13 @@ std::string missingFeatures(VkPhysicalDevice physical, VkSurfaceKHR surface) {
     VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &f12};
     vkGetPhysicalDeviceFeatures2(physical, &features);
     need(f12.descriptorIndexing && f12.runtimeDescriptorArray && f12.descriptorBindingPartiallyBound &&
-             f12.descriptorBindingSampledImageUpdateAfterBind && f12.descriptorBindingStorageBufferUpdateAfterBind,
+             f12.descriptorBindingSampledImageUpdateAfterBind && f12.descriptorBindingStorageBufferUpdateAfterBind &&
+             f12.shaderSampledImageArrayNonUniformIndexing,
          "descriptor indexing");
     need(f13.dynamicRendering, "dynamic rendering");
     need(f13.synchronization2, "synchronization2");
     need(f13.shaderDemoteToHelperInvocation, "demote to helper invocation");
+    need(features.features.textureCompressionBC, "BC texture compression");
     need(hasExtension(physical, VK_KHR_SWAPCHAIN_EXTENSION_NAME), VK_KHR_SWAPCHAIN_EXTENSION_NAME);
     need(hasExtension(physical, VK_KHR_SWAPCHAIN_MUTABLE_FORMAT_EXTENSION_NAME), VK_KHR_SWAPCHAIN_MUTABLE_FORMAT_EXTENSION_NAME);
     need(findQueueFamily(physical, surface) != UINT32_MAX, surface ? "graphics + present queue" : "graphics queue");
@@ -198,7 +200,8 @@ VkInstance createInstance(bool withSurface, bool validation, bool* debugUtils) {
 }
 
 // 이미지 배치 바꾸기 (synchronization2). 프레임에 몇 번뿐이라 단계는 넓게 잡는다
-void imageBarrier(VkCommandBuffer cmd, VkImage image, VkImageAspectFlags aspect, VkImageLayout from, VkImageLayout to) {
+void imageBarrier(VkCommandBuffer cmd, VkImage image, VkImageAspectFlags aspect, VkImageLayout from, VkImageLayout to,
+                  u32 mipLevels = 1) {
     VkImageMemoryBarrier2 b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
     b.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
     b.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
@@ -208,25 +211,34 @@ void imageBarrier(VkCommandBuffer cmd, VkImage image, VkImageAspectFlags aspect,
     b.newLayout = to;
     b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     b.image = image;
-    b.subresourceRange = {aspect, 0, 1, 0, 1};
+    b.subresourceRange = {aspect, 0, mipLevels, 0, 1};
     VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
     dep.imageMemoryBarrierCount = 1;
     dep.pImageMemoryBarriers = &b;
     vkCmdPipelineBarrier2(cmd, &dep);
 }
 
-VkImageView createView(VkDevice device, VkImage image, VkFormat format, VkImageAspectFlags aspect) {
+VkImageView createView(VkDevice device, VkImage image, VkFormat format, VkImageAspectFlags aspect, u32 mipLevels = 1) {
     VkImageViewCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     ci.image = image;
     ci.viewType = VK_IMAGE_VIEW_TYPE_2D;
     ci.format = format;
-    ci.subresourceRange = {aspect, 0, 1, 0, 1};
+    ci.subresourceRange = {aspect, 0, mipLevels, 0, 1};
     VkImageView view = VK_NULL_HANDLE;
     MEALKIT_VK(vkCreateImageView(device, &ci, nullptr, &view));
     return view;
 }
 
-VkFormat toVk(Format f) { return f == Format::R8Unorm ? VK_FORMAT_R8_UNORM : VK_FORMAT_R8G8B8A8_UNORM; }
+VkFormat toVk(Format f) {
+    switch (f) {
+    case Format::R8Unorm: return VK_FORMAT_R8_UNORM;
+    case Format::Rgba8Srgb: return VK_FORMAT_R8G8B8A8_SRGB;
+    case Format::Bc7Unorm: return VK_FORMAT_BC7_UNORM_BLOCK;
+    case Format::Bc7Srgb: return VK_FORMAT_BC7_SRGB_BLOCK;
+    case Format::Bc5Unorm: return VK_FORMAT_BC5_UNORM_BLOCK;
+    default: return VK_FORMAT_R8G8B8A8_UNORM;
+    }
+}
 
 } // namespace
 
@@ -464,11 +476,15 @@ bool Device::init(const DeviceDesc& desc) {
     f12.descriptorBindingPartiallyBound = VK_TRUE;
     f12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
     f12.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
+    f12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE; // 머티리얼 텍스처 (NonUniformResourceIndex)
     VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &f12};
     VkPhysicalDeviceFeatures supported{};
     vkGetPhysicalDeviceFeatures(m->physical, &supported);
     m->fillModeNonSolid = supported.fillModeNonSolid == VK_TRUE; // 선택 (에디터 와이어프레임 보기)
     features.features.fillModeNonSolid = supported.fillModeNonSolid;
+    m->samplerAnisotropy = supported.samplerAnisotropy == VK_TRUE; // 모델 텍스처 샘플러 (없으면 이방성 없이)
+    features.features.samplerAnisotropy = supported.samplerAnisotropy;
+    features.features.textureCompressionBC = supported.textureCompressionBC; // BC7·BC5 (데스크톱 GPU는 모두 있다)
     std::vector<const char*> extensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_SWAPCHAIN_MUTABLE_FORMAT_EXTENSION_NAME};
     m->memoryBudget = hasExtension(m->physical, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME); // 선택 (GPU 메모리 숫자)
     if (m->memoryBudget) extensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
@@ -525,24 +541,29 @@ bool Device::init(const DeviceDesc& desc) {
     sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     sci.maxLod = VK_LOD_CLAMP_NONE;
     VK(vkCreateSampler(m->device, &sci, nullptr, &m->linearClamp));
-    VkDescriptorSetLayoutBinding bindings[3] = {};
+    sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT; // 3: 모델 텍스처
+    sci.anisotropyEnable = m->samplerAnisotropy ? VK_TRUE : VK_FALSE;
+    sci.maxAnisotropy = 8.0f;
+    VK(vkCreateSampler(m->device, &sci, nullptr, &m->linearWrap));
+    VkDescriptorSetLayoutBinding bindings[4] = {};
     bindings[0] = {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kMaxBuffers, VK_SHADER_STAGE_ALL_GRAPHICS, nullptr};
     bindings[1] = {1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMaxTextures, VK_SHADER_STAGE_ALL_GRAPHICS, nullptr};
     bindings[2] = {2, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_ALL_GRAPHICS, &m->linearClamp};
+    bindings[3] = {3, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_ALL_GRAPHICS, &m->linearWrap};
     const VkDescriptorBindingFlags bindless =
         VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
-    const VkDescriptorBindingFlags bindingFlags[3] = {bindless, bindless, 0};
+    const VkDescriptorBindingFlags bindingFlags[4] = {bindless, bindless, 0, 0};
     VkDescriptorSetLayoutBindingFlagsCreateInfo flagsInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO};
-    flagsInfo.bindingCount = 3;
+    flagsInfo.bindingCount = 4;
     flagsInfo.pBindingFlags = bindingFlags;
     VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, &flagsInfo};
     li.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
-    li.bindingCount = 3;
+    li.bindingCount = 4;
     li.pBindings = bindings;
     VK(vkCreateDescriptorSetLayout(m->device, &li, nullptr, &m->setLayout));
     const VkDescriptorPoolSize sizes[3] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kMaxBuffers},
                                            {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMaxTextures},
-                                           {VK_DESCRIPTOR_TYPE_SAMPLER, 1}};
+                                           {VK_DESCRIPTOR_TYPE_SAMPLER, 2}};
     VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pi.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
     pi.maxSets = 1;
@@ -666,6 +687,7 @@ void Device::shutdown() {
         vkDestroyDescriptorPool(m->device, m->descriptorPool, nullptr);
         vkDestroyDescriptorSetLayout(m->device, m->setLayout, nullptr);
         vkDestroySampler(m->device, m->linearClamp, nullptr);
+        vkDestroySampler(m->device, m->linearWrap, nullptr);
         m->destroySwapchain();
         if (m->allocator) vmaDestroyAllocator(m->allocator);
         vkDestroyDevice(m->device, nullptr);
@@ -762,6 +784,69 @@ Texture Device::createTexture(u32 width, u32 height, Format format) {
     return {static_cast<u32>(m->textures.size())};
 }
 
+Texture Device::createTexture(const TextureInit& init) {
+    Impl::TextureEntry entry;
+    VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = toVk(init.format);
+    ici.extent = {init.width, init.height, 1};
+    ici.mipLevels = init.mipLevels;
+    ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    VK(vmaCreateImage(m->allocator, &ici, &aci, &entry.image, &entry.allocation, nullptr));
+    entry.view = createView(m->device, entry.image, ici.format, VK_IMAGE_ASPECT_COLOR_BIT, init.mipLevels);
+
+    // 밉을 빈틈 없이 차례로 담은 스테이징 버퍼 하나 → 밉마다 복사 (오프셋은 블록·텍셀 크기의 배수)
+    u64 total = 0;
+    std::vector<VkBufferImageCopy> regions(init.mipLevels);
+    for (u32 mip = 0; mip < init.mipLevels; ++mip) {
+        const u32 w = std::max(1u, init.width >> mip), h = std::max(1u, init.height >> mip);
+        VkBufferImageCopy& r = regions[mip];
+        r.bufferOffset = total;
+        r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, mip, 0, 1};
+        r.imageExtent = {w, h, 1};
+        total += textureMipBytes(init.format, w, h);
+    }
+    VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bci.size = total;
+    bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    VmaAllocationCreateInfo sai{};
+    sai.usage = VMA_MEMORY_USAGE_AUTO;
+    sai.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    VkBuffer staging = VK_NULL_HANDLE;
+    VmaAllocation stagingAllocation = VK_NULL_HANDLE;
+    VmaAllocationInfo stagingInfo{};
+    VK(vmaCreateBuffer(m->allocator, &bci, &sai, &staging, &stagingAllocation, &stagingInfo));
+    std::memcpy(stagingInfo.pMappedData, init.data, total);
+    VK(vmaFlushAllocation(m->allocator, stagingAllocation, 0, VK_WHOLE_SIZE));
+
+    VkCommandBuffer cmd = m->beginImmediate();
+    imageBarrier(cmd, entry.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 init.mipLevels);
+    vkCmdCopyBufferToImage(cmd, staging, entry.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, init.mipLevels, regions.data());
+    imageBarrier(cmd, entry.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, init.mipLevels);
+    m->endImmediate(cmd);
+    vmaDestroyBuffer(m->allocator, staging, stagingAllocation);
+
+    entry.slot = m->allocTextureSlot();
+    const VkDescriptorImageInfo imageInfo{VK_NULL_HANDLE, entry.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = m->descriptorSet;
+    write.dstBinding = 1;
+    write.dstArrayElement = entry.slot;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    write.pImageInfo = &imageInfo;
+    vkUpdateDescriptorSets(m->device, 1, &write, 0, nullptr);
+    m->textures.push_back(entry);
+    return {static_cast<u32>(m->textures.size())};
+}
+
 u32 Device::textureIndex(Texture texture) const { return m->textures[texture.id - 1].slot; }
 
 Pipeline Device::createPipeline(const PipelineDesc& desc) {
@@ -782,7 +867,10 @@ Pipeline Device::createPipeline(const PipelineDesc& desc) {
     for (size_t i = 0; i < desc.vertexAttributes.size(); ++i) {
         const VertexAttribute& a = desc.vertexAttributes[i];
         attributes.push_back({static_cast<u32>(i), 0,
-                              a.format == VertexFormat::Float3 ? VK_FORMAT_R32G32B32_SFLOAT : VK_FORMAT_R8G8B8A8_UNORM,
+                              a.format == VertexFormat::Float3     ? VK_FORMAT_R32G32B32_SFLOAT
+                              : a.format == VertexFormat::Half2    ? VK_FORMAT_R16G16_SFLOAT
+                              : a.format == VertexFormat::Uint16x2 ? VK_FORMAT_R16G16_UINT
+                                                                   : VK_FORMAT_R8G8B8A8_UNORM,
                               a.offset});
     }
     const VkVertexInputBindingDescription binding{0, desc.vertexStride, VK_VERTEX_INPUT_RATE_VERTEX};

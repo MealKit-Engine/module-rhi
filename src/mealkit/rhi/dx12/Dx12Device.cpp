@@ -146,7 +146,16 @@ D3D12_RESOURCE_STATES toD3d(TextureState s) {
                                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 }
 
-DXGI_FORMAT toDxgi(Format f) { return f == Format::R8Unorm ? DXGI_FORMAT_R8_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM; }
+DXGI_FORMAT toDxgi(Format f) {
+    switch (f) {
+    case Format::R8Unorm: return DXGI_FORMAT_R8_UNORM;
+    case Format::Rgba8Srgb: return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    case Format::Bc7Unorm: return DXGI_FORMAT_BC7_UNORM;
+    case Format::Bc7Srgb: return DXGI_FORMAT_BC7_UNORM_SRGB;
+    case Format::Bc5Unorm: return DXGI_FORMAT_BC5_UNORM;
+    default: return DXGI_FORMAT_R8G8B8A8_UNORM;
+    }
+}
 
 void __stdcall onDebugMessage(D3D12_MESSAGE_CATEGORY, D3D12_MESSAGE_SEVERITY severity, D3D12_MESSAGE_ID,
                               LPCSTR description, void*) {
@@ -257,18 +266,25 @@ void Device::Impl::createRootSignature() {
         params[1 + i].DescriptorTable.pDescriptorRanges = &ranges[i];
         params[1 + i].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     }
-    D3D12_STATIC_SAMPLER_DESC sampler{};
+    D3D12_STATIC_SAMPLER_DESC samplers[2] = {};
+    D3D12_STATIC_SAMPLER_DESC& sampler = samplers[0]; // s0: UI 아틀라스
     sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
     sampler.MaxLOD = D3D12_FLOAT32_MAX;
     sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    D3D12_STATIC_SAMPLER_DESC& wrap = samplers[1]; // s1: 모델 텍스처
+    wrap = sampler;
+    wrap.Filter = D3D12_FILTER_ANISOTROPIC;
+    wrap.MaxAnisotropy = 8;
+    wrap.AddressU = wrap.AddressV = wrap.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    wrap.ShaderRegister = 1;
 
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC rs{};
     rs.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
     rs.Desc_1_1.NumParameters = 3;
     rs.Desc_1_1.pParameters = params;
-    rs.Desc_1_1.NumStaticSamplers = 1;
-    rs.Desc_1_1.pStaticSamplers = &sampler;
+    rs.Desc_1_1.NumStaticSamplers = 2;
+    rs.Desc_1_1.pStaticSamplers = samplers;
     rs.Desc_1_1.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
     ComPtr<ID3DBlob> blob, error;
     if (FAILED(D3D12SerializeVersionedRootSignature(&rs, &blob, &error)))
@@ -530,13 +546,90 @@ Texture Device::createTexture(u32 width, u32 height, Format format) {
     return {static_cast<u32>(m->textures.size())};
 }
 
+Texture Device::createTexture(const TextureInit& init) {
+    Impl::TextureEntry entry;
+    entry.format = toDxgi(init.format);
+    D3D12_RESOURCE_DESC td{};
+    td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    td.Width = init.width;
+    td.Height = init.height;
+    td.DepthOrArraySize = 1;
+    td.MipLevels = static_cast<UINT16>(init.mipLevels);
+    td.Format = entry.format;
+    td.SampleDesc.Count = 1;
+    const D3D12_HEAP_PROPERTIES defaultHeap = heapProperties(D3D12_HEAP_TYPE_DEFAULT);
+    HR(m->device->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                          IID_PPV_ARGS(&entry.resource)));
+
+    // 밉마다 GPU 줄 간격(256바이트 정렬)으로 업로드 버퍼에 옮겨 한 번에 복사한다
+    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(init.mipLevels);
+    std::vector<UINT> rows(init.mipLevels);
+    std::vector<UINT64> rowBytes(init.mipLevels);
+    UINT64 total = 0;
+    m->device->GetCopyableFootprints(&td, 0, init.mipLevels, 0, footprints.data(), rows.data(), rowBytes.data(), &total);
+    const D3D12_HEAP_PROPERTIES uploadHeap = heapProperties(D3D12_HEAP_TYPE_UPLOAD);
+    const D3D12_RESOURCE_DESC stagingDesc = bufferDesc(total);
+    ComPtr<ID3D12Resource> staging;
+    HR(m->device->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE, &stagingDesc, D3D12_RESOURCE_STATE_GENERIC_READ,
+                                          nullptr, IID_PPV_ARGS(&staging)));
+    u8* mapped = nullptr;
+    const D3D12_RANGE noRead{0, 0};
+    HR(staging->Map(0, &noRead, reinterpret_cast<void**>(&mapped)));
+    const u8* src = static_cast<const u8*>(init.data);
+    for (u32 mip = 0; mip < init.mipLevels; ++mip) {
+        const u32 w = std::max(1u, init.width >> mip), h = std::max(1u, init.height >> mip);
+        const u64 tight = textureMipBytes(init.format, w, h) / rows[mip]; // 한 줄 (BC는 블록 줄)
+        for (UINT row = 0; row < rows[mip]; ++row)
+            std::memcpy(mapped + footprints[mip].Offset + static_cast<u64>(row) * footprints[mip].Footprint.RowPitch,
+                        src + row * tight, tight);
+        src += textureMipBytes(init.format, w, h);
+    }
+    staging->Unmap(0, nullptr);
+
+    ComPtr<ID3D12CommandAllocator> allocator;
+    HR(m->device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)));
+    ComPtr<ID3D12GraphicsCommandList> list;
+    HR(m->device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr, IID_PPV_ARGS(&list)));
+    for (u32 mip = 0; mip < init.mipLevels; ++mip) {
+        D3D12_TEXTURE_COPY_LOCATION dst{};
+        dst.pResource = entry.resource.Get();
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dst.SubresourceIndex = mip;
+        D3D12_TEXTURE_COPY_LOCATION from{};
+        from.pResource = staging.Get();
+        from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        from.PlacedFootprint = footprints[mip];
+        list->CopyTextureRegion(&dst, 0, 0, 0, &from, nullptr);
+    }
+    const D3D12_RESOURCE_BARRIER toRead =
+        transition(entry.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, toD3d(TextureState::ShaderRead));
+    list->ResourceBarrier(1, &toRead);
+    HR(list->Close());
+    ID3D12CommandList* lists[] = {list.Get()};
+    m->queue->ExecuteCommandLists(1, lists);
+    m->waitIdle();
+
+    entry.slot = m->allocTextureSlot();
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+    sd.Format = entry.format;
+    sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sd.Texture2D.MipLevels = init.mipLevels;
+    m->device->CreateShaderResourceView(entry.resource.Get(), &sd, m->srvCpu(entry.slot));
+    m->textures.push_back(std::move(entry));
+    return {static_cast<u32>(m->textures.size())};
+}
+
 u32 Device::textureIndex(Texture texture) const { return m->textures[texture.id - 1].slot - kMaxBuffers; }
 
 Pipeline Device::createPipeline(const PipelineDesc& desc) {
     std::vector<D3D12_INPUT_ELEMENT_DESC> layout;
     for (const VertexAttribute& a : desc.vertexAttributes)
         layout.push_back({a.semantic, 0,
-                          a.format == VertexFormat::Float3 ? DXGI_FORMAT_R32G32B32_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM, 0,
+                          a.format == VertexFormat::Float3   ? DXGI_FORMAT_R32G32B32_FLOAT
+                          : a.format == VertexFormat::Half2  ? DXGI_FORMAT_R16G16_FLOAT
+                          : a.format == VertexFormat::Uint16x2 ? DXGI_FORMAT_R16G16_UINT
+                                                             : DXGI_FORMAT_R8G8B8A8_UNORM, 0,
                           a.offset, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0});
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};

@@ -1,6 +1,7 @@
 #include "mealkit/rhi/vulkan/Vk.h"
 
 #include "mealkit/core/Log.h"
+#include "mealkit/rhi/GpuCapture.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -401,6 +402,7 @@ u32 Device::Impl::allocTextureSlot() {
 Device::~Device() { shutdown(); }
 
 bool Device::init(const DeviceDesc& desc) {
+    if (desc.gpuCapture) loadGpuCaptureTool(false); // 캡처 도구는 장치보다 먼저 들어와야 API를 가로챈다
     m = new Impl();
     m->hwnd = desc.window;
     m->width = desc.width;
@@ -463,6 +465,10 @@ bool Device::init(const DeviceDesc& desc) {
     f12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
     f12.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
     VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &f12};
+    VkPhysicalDeviceFeatures supported{};
+    vkGetPhysicalDeviceFeatures(m->physical, &supported);
+    m->fillModeNonSolid = supported.fillModeNonSolid == VK_TRUE; // 선택 (에디터 와이어프레임 보기)
+    features.features.fillModeNonSolid = supported.fillModeNonSolid;
     std::vector<const char*> extensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_SWAPCHAIN_MUTABLE_FORMAT_EXTENSION_NAME};
     m->memoryBudget = hasExtension(m->physical, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME); // 선택 (GPU 메모리 숫자)
     if (m->memoryBudget) extensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
@@ -793,7 +799,7 @@ Pipeline Device::createPipeline(const PipelineDesc& desc) {
     viewport.viewportCount = 1;
     viewport.scissorCount = 1;
     VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
-    raster.polygonMode = VK_POLYGON_MODE_FILL;
+    raster.polygonMode = desc.wireframe && m->fillModeNonSolid ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
     raster.cullMode = desc.cullBack ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE;
     raster.frontFace = VK_FRONT_FACE_CLOCKWISE; // 뷰포트를 뒤집어(setViewport) 화면 좌표가 DX12와 같다
     raster.lineWidth = 1.0f;
@@ -801,14 +807,19 @@ Pipeline Device::createPipeline(const PipelineDesc& desc) {
     multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
     const bool scene = desc.target == Target::Scene;
     VkPipelineDepthStencilStateCreateInfo depth{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
-    if (scene) {
+    if (scene && desc.depthTest) {
         depth.depthTestEnable = VK_TRUE;
         depth.depthWriteEnable = VK_TRUE;
         depth.depthCompareOp = VK_COMPARE_OP_GREATER; // reversed-Z
     }
     VkPipelineColorBlendAttachmentState blend{};
     blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-    if (desc.premultipliedBlend) {
+    if (desc.additiveBlend) {
+        blend.blendEnable = VK_TRUE;
+        blend.srcColorBlendFactor = blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        blend.dstColorBlendFactor = blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        blend.colorBlendOp = blend.alphaBlendOp = VK_BLEND_OP_ADD;
+    } else if (desc.premultipliedBlend) {
         blend.blendEnable = VK_TRUE;
         blend.srcColorBlendFactor = blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
         blend.dstColorBlendFactor = blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;

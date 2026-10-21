@@ -96,7 +96,8 @@ struct Device::Impl {
     f64 timestampMsPerTick = 0.0;
     u64 timestampMask = ~0ull; // timestampValidBits
     GpuTimes gpuTimes;
-    bool memoryBudget = false; // VK_EXT_memory_budget (없으면 VMA가 자기 할당으로 어림한다)
+    bool memoryBudget = false;
+    bool fillModeNonSolid = false; // 와이어프레임 파이프라인 (없으면 면으로) // VK_EXT_memory_budget (없으면 VMA가 자기 할당으로 어림한다)
 
     u32 width = 0, height = 0;
     u32 frameIndex = 0;

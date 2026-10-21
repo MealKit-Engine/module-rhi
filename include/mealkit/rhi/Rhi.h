@@ -84,6 +84,10 @@ struct PipelineDesc {
     Target target = Target::Scene;
     bool cullBack = true;       // 시계 방향이 앞면 (DX12 기본)
     bool premultipliedBlend = false;
+    // 에디터 보기 모드용 (render::DebugView): 선으로 그리기, 더하기 섞기(겹친 수 = 밝기), 깊이 시험·쓰기 끄기
+    bool wireframe = false; // Vulkan은 fillModeNonSolid가 없으면 면으로 그린다
+    bool additiveBlend = false;
+    bool depthTest = true; // Scene 대상만
 };
 
 struct DeviceDesc {
@@ -91,6 +95,7 @@ struct DeviceDesc {
     u32 width = 0;
     u32 height = 0;
     bool debug = false; // 검증 레이어 (DX12 debug layer, Vulkan validation)
+    bool gpuCapture = false; // 장치를 만들기 전에 RenderDoc·PIX를 불러온다 (rhi/GpuCapture.h, 개발 빌드)
 };
 
 // 캡처한 백버퍼 (RGBA8, 줄 순서대로)

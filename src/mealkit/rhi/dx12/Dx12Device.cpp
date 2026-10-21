@@ -1,6 +1,7 @@
 #include "mealkit/rhi/dx12/Dx12.h"
 
 #include "mealkit/core/Log.h"
+#include "mealkit/rhi/GpuCapture.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -280,6 +281,7 @@ void Device::Impl::createRootSignature() {
 Device::~Device() { shutdown(); }
 
 bool Device::init(const DeviceDesc& desc) {
+    if (desc.gpuCapture) loadGpuCaptureTool(true); // 캡처 도구는 장치보다 먼저 들어와야 API를 가로챈다
     m = new Impl();
     m->hwnd = static_cast<HWND>(desc.window);
     m->width = desc.width;
@@ -542,7 +544,11 @@ Pipeline Device::createPipeline(const PipelineDesc& desc) {
     pd.VS = {desc.vs.data, desc.vs.size};
     pd.PS = {desc.ps.data, desc.ps.size};
     D3D12_RENDER_TARGET_BLEND_DESC& b = pd.BlendState.RenderTarget[0];
-    if (desc.premultipliedBlend) {
+    if (desc.additiveBlend) {
+        b.BlendEnable = TRUE;
+        b.SrcBlend = b.DestBlend = b.SrcBlendAlpha = b.DestBlendAlpha = D3D12_BLEND_ONE;
+        b.BlendOp = b.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    } else if (desc.premultipliedBlend) {
         b.BlendEnable = TRUE;
         b.SrcBlend = D3D12_BLEND_ONE;
         b.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
@@ -553,12 +559,12 @@ Pipeline Device::createPipeline(const PipelineDesc& desc) {
     }
     b.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     pd.SampleMask = UINT_MAX;
-    pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pd.RasterizerState.FillMode = desc.wireframe ? D3D12_FILL_MODE_WIREFRAME : D3D12_FILL_MODE_SOLID;
     pd.RasterizerState.CullMode = desc.cullBack ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
     pd.RasterizerState.DepthClipEnable = TRUE;
     const bool scene = desc.target == Target::Scene;
     if (scene) {
-        pd.DepthStencilState.DepthEnable = TRUE;
+        pd.DepthStencilState.DepthEnable = desc.depthTest ? TRUE : FALSE;
         pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
         pd.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER; // reversed-Z
         pd.DSVFormat = kDepthFormat;

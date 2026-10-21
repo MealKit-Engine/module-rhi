@@ -99,6 +99,22 @@ struct Capture {
     std::vector<u8> rgba;
 };
 
+// GPU 시간 (타임스탬프 쿼리). 구간 번호(0..kMaxGpuTimers-1)의 뜻은 쓰는 쪽(렌더러의 패스)이 정한다.
+// 결과는 GPU가 끝낸 가장 최근 프레임 값이다 (kFramesInFlight 프레임 늦다). 이번 프레임에 쓰지 않은 구간은 0.
+inline constexpr u32 kMaxGpuTimers = 8;
+struct GpuTimes {
+    bool valid = false; // 타임스탬프를 지원하고 한 프레임 이상 끝났다
+    f32 frameMs = 0.0f; // 명령 목록 처음부터 끝까지
+    f32 timerMs[kMaxGpuTimers] = {};
+};
+
+// GPU 메모리: 드라이버가 이 프로세스에 주는 예산과 지금 쓰는 양 (DX12 QueryVideoMemoryInfo, Vulkan VK_EXT_memory_budget).
+// 내장 그래픽(UMA)은 시스템 메모리를 같이 쓰므로 예산이 공유 메모리 기준이다. 모르면 0
+struct GpuMemory {
+    u64 used = 0;
+    u64 budget = 0;
+};
+
 class Device;
 
 // 한 프레임의 명령 목록 (Device::beginFrame ~ endFrame 사이).
@@ -119,6 +135,9 @@ public:
     void textureBarrier(Texture texture, TextureState before, TextureState after);
     // 업로드 링(Device::allocUpload)의 offset에서 텍스처 영역으로 복사한다. rowPitch = Device::copyPitch
     void copyToTexture(Texture texture, u32 x, u32 y, u32 width, u32 height, u64 uploadOffset, u32 rowPitch);
+    // GPU 시간 구간 (Device::gpuTimes). 한 프레임에 구간마다 한 번씩, begin 다음 end
+    void beginTimer(u32 timer);
+    void endTimer(u32 timer);
 
 private:
     friend class Device;
@@ -161,6 +180,9 @@ public:
     // 제출하고 보여 준다. capture가 있으면 GPU를 기다려 백버퍼를 읽는다
     void endFrame(bool vsync, Capture* capture = nullptr);
     void waitIdle();
+
+    const GpuTimes& gpuTimes() const;
+    GpuMemory gpuMemory() const;
 
     struct Impl;
     Impl* impl() const { return m; } // 백엔드 파일(rhi/<api>/) 전용

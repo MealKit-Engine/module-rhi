@@ -13,6 +13,7 @@ constexpr u32 kMaxBuffers = 16;    // g_buffers[] (바인딩 0)
 constexpr u32 kMaxTextures = 4096; // g_textures[] (바인딩 1)
 constexpr u64 kUploadBytesPerFrame = 8ull << 20;
 constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT;
+constexpr u32 kQueriesPerFrame = 2 + 2 * kMaxGpuTimers; // 프레임 처음·끝 + 구간마다 처음·끝
 
 void checkVk(VkResult result, const char* expr, const char* file, int line);
 #define MEALKIT_VK(expr) ::mealkit::rhi::checkVk((expr), #expr, __FILE__, __LINE__)
@@ -63,6 +64,8 @@ struct Device::Impl {
         VkCommandBuffer cmd = VK_NULL_HANDLE;
         VkFence fence = VK_NULL_HANDLE;
         VkSemaphore imageAcquired = VK_NULL_HANDLE;
+        bool timed = false; // 타임스탬프를 쓰고 제출했다 (fence 뒤에 읽는다)
+        u32 timerMask = 0;  // 이 프레임에 쓴 구간
     } frames[Device::kFramesInFlight];
     CommandList cmd;
     VkCommandPool immediatePool = VK_NULL_HANDLE; // 불러올 때 복사 (GPU를 기다린다)
@@ -88,6 +91,13 @@ struct Device::Impl {
     std::vector<TextureEntry> textures;
     std::vector<VkPipeline> pipelines;
 
+    // GPU 시간: 프레임마다 kQueriesPerFrame칸
+    VkQueryPool queryPool = VK_NULL_HANDLE;
+    f64 timestampMsPerTick = 0.0;
+    u64 timestampMask = ~0ull; // timestampValidBits
+    GpuTimes gpuTimes;
+    bool memoryBudget = false; // VK_EXT_memory_budget (없으면 VMA가 자기 할당으로 어림한다)
+
     u32 width = 0, height = 0;
     u32 frameIndex = 0;
     u32 imageIndex = 0;
@@ -98,6 +108,8 @@ struct Device::Impl {
     std::string initError;
 
     VkCommandBuffer current() const { return frames[frameIndex].cmd; }
+    u32 queryBase() const { return frameIndex * kQueriesPerFrame; }
+    void readGpuTimes(const Frame& frame, u32 base);
     bool createSwapchain();
     void destroySwapchain();
     void endRendering();

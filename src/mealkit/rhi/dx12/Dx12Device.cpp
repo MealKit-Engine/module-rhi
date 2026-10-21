@@ -180,6 +180,17 @@ void Device::Impl::waitForFence(u64 value) {
     }
 }
 
+void Device::Impl::readGpuTimes(const Frame& frame, u32 base) {
+    const u64* q = queryCpu + base;
+    const auto ms = [&](u32 begin) { return q[begin + 1] > q[begin] ? static_cast<f32>((q[begin + 1] - q[begin]) * timestampMsPerTick) : 0.0f; };
+    GpuTimes t;
+    t.valid = true;
+    t.frameMs = ms(0);
+    for (u32 i = 0; i < kMaxGpuTimers; ++i)
+        if (frame.timerMask & (1u << i)) t.timerMs[i] = ms(2 + 2 * i);
+    gpuTimes = t;
+}
+
 u32 Device::Impl::allocTextureSlot() {
     if (freeTextureSlots.empty()) MEALKIT_FATAL("Bindless texture slots exhausted (%u)", kMaxTextures);
     const u32 slot = freeTextureSlots.back();
@@ -393,6 +404,28 @@ bool Device::init(const DeviceDesc& desc) {
     rv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
     m->device->CreateShaderResourceView(m->uploadBuffer.Get(), &rv, m->srvCpu(0));
 
+    // GPU 시간: 타임스탬프 쿼리 힙 + readback 버퍼 (프레임마다 한 구간)
+    UINT64 frequency = 0;
+    if (SUCCEEDED(m->queue->GetTimestampFrequency(&frequency)) && frequency > 0) {
+        D3D12_QUERY_HEAP_DESC timestampDesc{};
+        timestampDesc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+        timestampDesc.Count = kQueriesPerFrame * kFramesInFlight;
+        const D3D12_HEAP_PROPERTIES readbackHeap = heapProperties(D3D12_HEAP_TYPE_READBACK);
+        const D3D12_RESOURCE_DESC rbDesc = bufferDesc(timestampDesc.Count * 8ull);
+        if (SUCCEEDED(m->device->CreateQueryHeap(&timestampDesc, IID_PPV_ARGS(&m->queryHeap))) &&
+            SUCCEEDED(m->device->CreateCommittedResource(&readbackHeap, D3D12_HEAP_FLAG_NONE, &rbDesc,
+                                                         D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                         IID_PPV_ARGS(&m->queryReadback))) &&
+            SUCCEEDED(m->queryReadback->Map(0, nullptr, reinterpret_cast<void**>(const_cast<u64**>(&m->queryCpu))))) {
+            m->timestampMsPerTick = 1000.0 / static_cast<f64>(frequency);
+        } else {
+            m->queryHeap.Reset();
+            m->queryReadback.Reset();
+            m->queryCpu = nullptr;
+        }
+    }
+    m->adapter.As(&m->adapter3);
+
     m->createRootSignature();
     m->createSwapchainResources();
 #if defined(TRACY_ENABLE)
@@ -549,8 +582,12 @@ bool Device::beginFrame() {
 
     Impl::Frame& frame = m->frames[m->frameIndex];
     m->waitForFence(frame.fenceValue);
+    if (frame.timed) m->readGpuTimes(frame, m->queryBase());
+    frame.timed = false;
+    frame.timerMask = 0;
     HR(frame.allocator->Reset());
     HR(m->list->Reset(frame.allocator.Get(), nullptr));
+    if (m->queryHeap) m->list->EndQuery(m->queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, m->queryBase());
 #if defined(TRACY_ENABLE)
     static const tracy::SourceLocationData gpuFrameLocation{"GPU frame", __FUNCTION__, __FILE__, __LINE__, 0};
     if (m->tracyGpu) m->tracyFrameZone.emplace(m->tracyGpu, m->list.Get(), &gpuFrameLocation, true);
@@ -624,6 +661,15 @@ void Device::endFrame(bool vsync, Capture* capture) {
 #if defined(TRACY_ENABLE)
     m->tracyFrameZone.reset(); // GPU 구간 끝 (커맨드 리스트를 닫기 전에)
 #endif
+    Impl::Frame& frame = m->frames[m->frameIndex];
+    if (m->queryHeap) { // 쓴 쿼리만 readback으로 (쓰지 않은 칸을 읽으면 검증 레이어 오류)
+        const u32 base = m->queryBase();
+        list->EndQuery(m->queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, base + 1);
+        m->resolveQueries(base, 2);
+        for (u32 i = 0; i < kMaxGpuTimers; ++i)
+            if (frame.timerMask & (1u << i)) m->resolveQueries(base + 2 + 2 * i, 2);
+        frame.timed = true;
+    }
     HR(list->Close());
     ID3D12CommandList* lists[] = {list};
     m->queue->ExecuteCommandLists(1, lists);
@@ -632,7 +678,6 @@ void Device::endFrame(bool vsync, Capture* capture) {
     const UINT presentFlags = (!vsync && m->tearingSupported) ? DXGI_PRESENT_ALLOW_TEARING : 0;
     HR(m->swapchain->Present(syncInterval, presentFlags));
 
-    Impl::Frame& frame = m->frames[m->frameIndex];
     frame.fenceValue = m->signal();
 #if defined(TRACY_ENABLE)
     if (m->tracyGpu) {
@@ -672,7 +717,31 @@ void Device::waitIdle() {
     if (m && m->queue && m->fence) m->waitIdle();
 }
 
+const GpuTimes& Device::gpuTimes() const {
+    static const GpuTimes none;
+    return m ? m->gpuTimes : none;
+}
+
+GpuMemory Device::gpuMemory() const {
+    DXGI_QUERY_VIDEO_MEMORY_INFO info{};
+    if (!m || !m->adapter3 || FAILED(m->adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info))) return {};
+    return {info.CurrentUsage, info.Budget};
+}
+
 // ---------------------------------------------------------------- CommandList
+
+void CommandList::beginTimer(u32 timer) {
+    Device::Impl& d = *m_device->impl();
+    if (!d.queryHeap || timer >= kMaxGpuTimers) return;
+    d.frames[d.frameIndex].timerMask |= 1u << timer;
+    d.list->EndQuery(d.queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, d.queryBase() + 2 + 2 * timer);
+}
+
+void CommandList::endTimer(u32 timer) {
+    Device::Impl& d = *m_device->impl();
+    if (!d.queryHeap || timer >= kMaxGpuTimers) return;
+    d.list->EndQuery(d.queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, d.queryBase() + 3 + 2 * timer);
+}
 
 void CommandList::beginScene(const f32 clearColor[4], f32 clearDepth) {
     Device::Impl* m = m_device->impl();

@@ -463,12 +463,14 @@ bool Device::init(const DeviceDesc& desc) {
     f12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
     f12.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
     VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &f12};
-    const char* extensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_SWAPCHAIN_MUTABLE_FORMAT_EXTENSION_NAME};
+    std::vector<const char*> extensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_SWAPCHAIN_MUTABLE_FORMAT_EXTENSION_NAME};
+    m->memoryBudget = hasExtension(m->physical, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME); // 선택 (GPU 메모리 숫자)
+    if (m->memoryBudget) extensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
     VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &features};
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qi;
-    dci.enabledExtensionCount = 2;
-    dci.ppEnabledExtensionNames = extensions;
+    dci.enabledExtensionCount = static_cast<u32>(extensions.size());
+    dci.ppEnabledExtensionNames = extensions.data();
     VK(vkCreateDevice(m->physical, &dci, nullptr, &m->device));
     volkLoadDevice(m->device);
     vkGetDeviceQueue(m->device, m->queueFamily, 0, &m->queue);
@@ -482,6 +484,7 @@ bool Device::init(const DeviceDesc& desc) {
     vi.device = m->device;
     vi.instance = m->instance;
     vi.pVulkanFunctions = &functions;
+    if (m->memoryBudget) vi.flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
     VK(vmaCreateAllocator(&vi, &m->allocator));
 
     // 스왑체인 형식: UNORM(오버레이) + 같은 이미지의 SRGB 뷰(장면). Windows 드라이버는 BGRA가 흔하다
@@ -594,7 +597,40 @@ bool Device::init(const DeviceDesc& desc) {
     ipi.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
     ipi.queueFamilyIndex = m->queueFamily;
     VK(vkCreateCommandPool(m->device, &ipi, nullptr, &m->immediatePool));
+
+    // GPU 시간: 그래픽 큐가 타임스탬프를 지원하면 쿼리 풀 하나 (프레임마다 한 구간)
+    u32 familyCount = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(m->physical, &familyCount, nullptr);
+    std::vector<VkQueueFamilyProperties> families(familyCount);
+    vkGetPhysicalDeviceQueueFamilyProperties(m->physical, &familyCount, families.data());
+    const u32 validBits = m->queueFamily < familyCount ? families[m->queueFamily].timestampValidBits : 0;
+    if (validBits > 0 && m->properties.limits.timestampPeriod > 0.0f) {
+        VkQueryPoolCreateInfo qpi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+        qpi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qpi.queryCount = kQueriesPerFrame * kFramesInFlight;
+        if (vkCreateQueryPool(m->device, &qpi, nullptr, &m->queryPool) == VK_SUCCESS) {
+            m->timestampMsPerTick = static_cast<f64>(m->properties.limits.timestampPeriod) / 1e6;
+            m->timestampMask = validBits >= 64 ? ~0ull : (1ull << validBits) - 1;
+        }
+    }
     return true;
+}
+
+void Device::Impl::readGpuTimes(const Frame& frame, u32 base) {
+    const auto ms = [&](u32 begin) {
+        u64 q[2] = {};
+        if (vkGetQueryPoolResults(device, queryPool, base + begin, 2, sizeof(q), q, sizeof(u64), VK_QUERY_RESULT_64_BIT) !=
+            VK_SUCCESS)
+            return 0.0f;
+        const u64 ticks = (q[1] - q[0]) & timestampMask;
+        return static_cast<f32>(static_cast<f64>(ticks) * timestampMsPerTick);
+    };
+    GpuTimes t;
+    t.valid = true;
+    t.frameMs = ms(0);
+    for (u32 i = 0; i < kMaxGpuTimers; ++i)
+        if (frame.timerMask & (1u << i)) t.timerMs[i] = ms(2 + 2 * i);
+    gpuTimes = t;
 }
 
 const std::string& Device::initError() const {
@@ -619,6 +655,7 @@ void Device::shutdown() {
             vkDestroySemaphore(m->device, f.imageAcquired, nullptr);
         }
         vkDestroyCommandPool(m->device, m->immediatePool, nullptr);
+        if (m->queryPool) vkDestroyQueryPool(m->device, m->queryPool, nullptr);
         vkDestroyPipelineLayout(m->device, m->pipelineLayout, nullptr);
         vkDestroyDescriptorPool(m->device, m->descriptorPool, nullptr);
         vkDestroyDescriptorSetLayout(m->device, m->setLayout, nullptr);
@@ -825,11 +862,18 @@ bool Device::beginFrame() {
         return false;
     }
     if (acquired != VK_SUBOPTIMAL_KHR) VK(acquired);
+    if (frame.timed) m->readGpuTimes(frame, m->queryBase());
+    frame.timed = false;
+    frame.timerMask = 0;
     VK(vkResetFences(m->device, 1, &frame.fence));
     VK(vkResetCommandPool(m->device, frame.pool, 0));
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     VK(vkBeginCommandBuffer(frame.cmd, &bi));
+    if (m->queryPool) {
+        vkCmdResetQueryPool(frame.cmd, m->queryPool, m->queryBase(), kQueriesPerFrame);
+        vkCmdWriteTimestamp2(frame.cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, m->queryPool, m->queryBase());
+    }
     m->uploadOffset = m->frameIndex * kUploadBytesPerFrame;
     m->uploadLimit = m->uploadOffset + kUploadBytesPerFrame;
     m->imageIsTarget = false;
@@ -884,9 +928,13 @@ void Device::endFrame(bool vsync, Capture* capture) {
     } else {
         imageBarrier(cmd, s.image, VK_IMAGE_ASPECT_COLOR_BIT, current, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     }
+    Impl::Frame& frame = m->frames[m->frameIndex];
+    if (m->queryPool) {
+        vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, m->queryPool, m->queryBase() + 1);
+        frame.timed = true;
+    }
     VK(vkEndCommandBuffer(cmd));
 
-    Impl::Frame& frame = m->frames[m->frameIndex];
     VkSemaphoreSubmitInfo wait{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
     wait.semaphore = frame.imageAcquired;
     wait.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
@@ -941,6 +989,26 @@ void Device::waitIdle() {
     if (m && m->device) vkDeviceWaitIdle(m->device);
 }
 
+const GpuTimes& Device::gpuTimes() const {
+    static const GpuTimes none;
+    return m ? m->gpuTimes : none;
+}
+
+GpuMemory Device::gpuMemory() const {
+    if (!m || !m->allocator) return {};
+    VmaBudget budgets[VK_MAX_MEMORY_HEAPS] = {};
+    vmaGetHeapBudgets(m->allocator, budgets);
+    const VkPhysicalDeviceMemoryProperties* props = nullptr;
+    vmaGetMemoryProperties(m->allocator, &props);
+    GpuMemory out; // DX12의 LOCAL 세그먼트처럼 장치 로컬 힙만 (UMA는 시스템 메모리 힙이 장치 로컬)
+    for (u32 i = 0; i < props->memoryHeapCount; ++i) {
+        if (!(props->memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)) continue;
+        out.used += budgets[i].usage;
+        out.budget += budgets[i].budget;
+    }
+    return out;
+}
+
 // ---------------------------------------------------------------- CommandList
 
 void CommandList::beginScene(const f32 clearColor[4], f32 clearDepth) {
@@ -948,6 +1016,19 @@ void CommandList::beginScene(const f32 clearColor[4], f32 clearDepth) {
 }
 
 void CommandList::beginOverlay() { m_device->impl()->beginRendering(Device::Impl::Bound::Overlay, nullptr, 0.0f); }
+
+void CommandList::beginTimer(u32 timer) {
+    Device::Impl& d = *m_device->impl();
+    if (!d.queryPool || timer >= kMaxGpuTimers) return;
+    d.frames[d.frameIndex].timerMask |= 1u << timer;
+    vkCmdWriteTimestamp2(d.current(), VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, d.queryPool, d.queryBase() + 2 + 2 * timer);
+}
+
+void CommandList::endTimer(u32 timer) {
+    Device::Impl& d = *m_device->impl();
+    if (!d.queryPool || timer >= kMaxGpuTimers) return;
+    vkCmdWriteTimestamp2(d.current(), VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, d.queryPool, d.queryBase() + 3 + 2 * timer);
+}
 
 void CommandList::setViewport(f32 x, f32 y, f32 width, f32 height) {
     VkCommandBuffer cmd = m_device->impl()->current();

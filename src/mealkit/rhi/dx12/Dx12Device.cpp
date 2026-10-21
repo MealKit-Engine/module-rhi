@@ -574,6 +574,15 @@ Pipeline Device::createPipeline(const PipelineDesc& desc) {
     return {static_cast<u32>(m->pipelines.size())};
 }
 
+bool Device::recreatePipeline(Pipeline pipeline, const PipelineDesc& desc) {
+    if (!m || m->inFrame || !pipeline || pipeline.id > m->pipelines.size()) return false;
+    m->waitIdle();
+    createPipeline(desc); // 끝에 붙은 새 것을 원래 자리로
+    m->pipelines[pipeline.id - 1] = std::move(m->pipelines.back());
+    m->pipelines.pop_back();
+    return true;
+}
+
 bool Device::beginFrame() {
     if (!m || m->width == 0 || m->height == 0) return false;
 

@@ -168,6 +168,8 @@ public:
     Texture createTexture(u32 width, u32 height, Format format);
     u32 textureIndex(Texture texture) const; // g_textures[] 번호
     Pipeline createPipeline(const PipelineDesc& desc);
+    // 같은 핸들의 파이프라인을 새 desc로 바꾼다 (셰이더 핫 리로드). GPU를 기다리므로 프레임 밖에서만 부른다
+    bool recreatePipeline(Pipeline pipeline, const PipelineDesc& desc);
 
     // 프레임: false면 이번 프레임은 그리지 않는다 (최소화, 스왑체인 다시 만듦 등)
     bool beginFrame();

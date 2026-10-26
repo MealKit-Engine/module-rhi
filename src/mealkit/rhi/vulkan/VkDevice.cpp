@@ -995,6 +995,7 @@ Pipeline Device::createPipeline(const PipelineDesc& desc) {
                               a.format == VertexFormat::Float3     ? VK_FORMAT_R32G32B32_SFLOAT
                               : a.format == VertexFormat::Half2    ? VK_FORMAT_R16G16_SFLOAT
                               : a.format == VertexFormat::Uint16x2 ? VK_FORMAT_R16G16_UINT
+                              : a.format == VertexFormat::Uint8x4  ? VK_FORMAT_R8G8B8A8_UINT
                                                                    : VK_FORMAT_R8G8B8A8_UNORM,
                               a.offset});
     }

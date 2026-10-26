@@ -87,7 +87,7 @@ enum class BufferUsage : u8 { Vertex, Index16, Index32 };
 enum class TextureState : u8 { ShaderRead, CopyDst };
 
 // 정점 속성 (HLSL 입력 순서대로. DX12 시맨틱 이름, Vulkan location = 순서)
-enum class VertexFormat : u8 { Float3, Unorm8x4, Half2, Uint16x2 };
+enum class VertexFormat : u8 { Float3, Unorm8x4, Half2, Uint16x2, Uint8x4 };
 struct VertexAttribute {
     const char* semantic = "";
     VertexFormat format = VertexFormat::Float3;

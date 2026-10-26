@@ -126,8 +126,10 @@ struct DeviceDesc {
     bool gpuCapture = false; // 장치를 만들기 전에 RenderDoc·PIX를 불러온다 (rhi/GpuCapture.h, 개발 빌드)
 };
 
-// 캡처한 백버퍼 (RGBA8, 줄 순서대로)
+// 캡처한 백버퍼 (RGBA8, 줄 순서대로). source가 있으면 백버퍼 대신 그 오프스크린 대상을 읽는다 (반사 프로브 굽기,
+// 값은 sRGB로 쓰인 그대로). 대상은 이번 프레임에 endTarget까지 끝나 있어야 한다
 struct Capture {
+    RenderTarget source;
     u32 width = 0, height = 0;
     std::vector<u8> rgba;
 };

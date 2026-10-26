@@ -808,27 +808,31 @@ void Device::endFrame(bool vsync, Capture* capture) {
     ComPtr<ID3D12Resource> readback;
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
     u64 readbackBytes = 0;
+    ID3D12Resource* captured = capture && capture->source ? m->textures[m->targets[capture->source.id - 1].texture - 1].resource.Get()
+                                                          : backBuffer;
+    const D3D12_RESOURCE_STATES capturedState = captured == backBuffer ? current : toD3d(TextureState::ShaderRead);
     if (capture) {
-        const D3D12_RESOURCE_DESC texDesc = backBuffer->GetDesc();
+        const D3D12_RESOURCE_DESC texDesc = captured->GetDesc();
         m->device->GetCopyableFootprints(&texDesc, 0, 1, 0, &footprint, nullptr, nullptr, &readbackBytes);
         const D3D12_HEAP_PROPERTIES readbackHeap = heapProperties(D3D12_HEAP_TYPE_READBACK);
         const D3D12_RESOURCE_DESC rbDesc = bufferDesc(readbackBytes);
         HR(m->device->CreateCommittedResource(&readbackHeap, D3D12_HEAP_FLAG_NONE, &rbDesc,
                                               D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback)));
-        const D3D12_RESOURCE_BARRIER toCopy = transition(backBuffer, current, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        const D3D12_RESOURCE_BARRIER toCopy = transition(captured, capturedState, D3D12_RESOURCE_STATE_COPY_SOURCE);
         list->ResourceBarrier(1, &toCopy);
         D3D12_TEXTURE_COPY_LOCATION dst{};
         dst.pResource = readback.Get();
         dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
         dst.PlacedFootprint = footprint;
         D3D12_TEXTURE_COPY_LOCATION src{};
-        src.pResource = backBuffer;
+        src.pResource = captured;
         src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-        const D3D12_RESOURCE_BARRIER toPresent =
-            transition(backBuffer, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT);
-        list->ResourceBarrier(1, &toPresent);
-    } else if (m->backBufferIsTarget) {
+        const D3D12_RESOURCE_BARRIER back = transition(captured, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                                       captured == backBuffer ? D3D12_RESOURCE_STATE_PRESENT : capturedState);
+        list->ResourceBarrier(1, &back);
+    }
+    if ((!capture || captured != backBuffer) && m->backBufferIsTarget) {
         const D3D12_RESOURCE_BARRIER toPresent =
             transition(backBuffer, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
         list->ResourceBarrier(1, &toPresent);

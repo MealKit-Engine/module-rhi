@@ -806,7 +806,7 @@ RenderTarget Device::createRenderTarget(u32 width, u32 height) {
     ici.arrayLayers = 1;
     ici.samples = VK_SAMPLE_COUNT_1_BIT;
     ici.tiling = VK_IMAGE_TILING_OPTIMAL;
-    ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT; // 읽기 (Capture::source)
     VmaAllocationCreateInfo aci{};
     aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
     Impl::TextureEntry color;
@@ -1100,22 +1100,27 @@ void Device::endFrame(bool vsync, Capture* capture) {
     VkBuffer readback = VK_NULL_HANDLE;
     VmaAllocation readbackAllocation = VK_NULL_HANDLE;
     VmaAllocationInfo readbackInfo{};
+    const Impl::TargetEntry* source = capture && capture->source ? &m->targets[capture->source.id - 1] : nullptr;
+    const u32 captureW = source ? source->width : m->width, captureH = source ? source->height : m->height;
     if (capture) {
         VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-        bci.size = static_cast<u64>(m->width) * m->height * 4;
+        bci.size = static_cast<u64>(captureW) * captureH * 4;
         bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         VmaAllocationCreateInfo aci{};
         aci.usage = VMA_MEMORY_USAGE_AUTO;
         aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
         VK(vmaCreateBuffer(m->allocator, &bci, &aci, &readback, &readbackAllocation, &readbackInfo));
-        imageBarrier(cmd, s.image, VK_IMAGE_ASPECT_COLOR_BIT, current, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        const VkImage image = source ? m->textures[source->texture - 1].image : s.image;
+        const VkImageLayout before = source ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : current;
+        imageBarrier(cmd, image, VK_IMAGE_ASPECT_COLOR_BIT, before, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         VkBufferImageCopy region{};
         region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        region.imageExtent = {m->width, m->height, 1};
-        vkCmdCopyImageToBuffer(cmd, s.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback, 1, &region);
-        imageBarrier(cmd, s.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                     VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
-    } else {
+        region.imageExtent = {captureW, captureH, 1};
+        vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback, 1, &region);
+        imageBarrier(cmd, image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                     source ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    }
+    if (!capture || source) {
         imageBarrier(cmd, s.image, VK_IMAGE_ASPECT_COLOR_BIT, current, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     }
     Impl::Frame& frame = m->frames[m->frameIndex];
@@ -1159,9 +1164,9 @@ void Device::endFrame(bool vsync, Capture* capture) {
     if (readback) {
         VK(vkWaitForFences(m->device, 1, &frame.fence, VK_TRUE, UINT64_MAX));
         VK(vmaInvalidateAllocation(m->allocator, readbackAllocation, 0, VK_WHOLE_SIZE));
-        capture->width = m->width;
-        capture->height = m->height;
-        capture->rgba.resize(static_cast<size_t>(m->width) * m->height * 4);
+        capture->width = captureW;
+        capture->height = captureH;
+        capture->rgba.resize(static_cast<size_t>(captureW) * captureH * 4);
         const u8* src = static_cast<const u8*>(readbackInfo.pMappedData);
         for (size_t i = 0; i < capture->rgba.size(); i += 4) {
             capture->rgba[i + 0] = src[i + (m->swapchainBgra ? 2 : 0)];

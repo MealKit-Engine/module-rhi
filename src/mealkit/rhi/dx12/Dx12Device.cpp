@@ -688,6 +688,48 @@ RenderTarget Device::createRenderTarget(u32 width, u32 height) {
     return {static_cast<u32>(m->targets.size())};
 }
 
+RenderTarget Device::createDepthTarget(u32 width, u32 height) {
+    Impl::TextureEntry depth;
+    depth.format = DXGI_FORMAT_R32_FLOAT; // 읽기 뷰
+    D3D12_RESOURCE_DESC td{};
+    td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    td.Width = width;
+    td.Height = height;
+    td.DepthOrArraySize = 1;
+    td.MipLevels = 1;
+    td.Format = DXGI_FORMAT_R32_TYPELESS; // 쓰기는 D32 뷰, 읽기는 R32 뷰
+    td.SampleDesc.Count = 1;
+    td.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+    const D3D12_HEAP_PROPERTIES defaultHeap = heapProperties(D3D12_HEAP_TYPE_DEFAULT);
+    D3D12_CLEAR_VALUE clear{};
+    clear.Format = kDepthFormat;
+    HR(m->device->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &td, toD3d(TextureState::ShaderRead), &clear,
+                                          IID_PPV_ARGS(&depth.resource)));
+    depth.slot = m->allocTextureSlot();
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+    sd.Format = depth.format;
+    sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sd.Texture2D.MipLevels = 1;
+    m->device->CreateShaderResourceView(depth.resource.Get(), &sd, m->srvCpu(depth.slot));
+
+    Impl::TargetEntry target;
+    target.depthOnly = true;
+    target.depth = depth.resource;
+    D3D12_DESCRIPTOR_HEAP_DESC hd{};
+    hd.NumDescriptors = 1;
+    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+    HR(m->device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&target.dsvHeap)));
+    D3D12_DEPTH_STENCIL_VIEW_DESC dsv{};
+    dsv.Format = kDepthFormat;
+    dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+    m->device->CreateDepthStencilView(depth.resource.Get(), &dsv, target.dsvHeap->GetCPUDescriptorHandleForHeapStart());
+    m->textures.push_back(std::move(depth));
+    target.texture = static_cast<u32>(m->textures.size());
+    m->targets.push_back(std::move(target));
+    return {static_cast<u32>(m->targets.size())};
+}
+
 Texture Device::renderTargetTexture(RenderTarget target) const { return {target ? m->targets[target.id - 1].texture : 0}; }
 
 Pipeline Device::createPipeline(const PipelineDesc& desc) {
@@ -723,17 +765,17 @@ Pipeline Device::createPipeline(const PipelineDesc& desc) {
     pd.RasterizerState.FillMode = desc.wireframe ? D3D12_FILL_MODE_WIREFRAME : D3D12_FILL_MODE_SOLID;
     pd.RasterizerState.CullMode = desc.cullFront ? D3D12_CULL_MODE_FRONT : desc.cullBack ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
     pd.RasterizerState.DepthClipEnable = TRUE;
-    const bool scene = desc.target == Target::Scene;
-    if (scene) {
-        pd.DepthStencilState.DepthEnable = desc.depthTest ? TRUE : FALSE;
+    const bool scene = desc.target == Target::Scene, shadow = desc.target == Target::Shadow;
+    if (scene || shadow) {
+        pd.DepthStencilState.DepthEnable = desc.depthTest || shadow ? TRUE : FALSE;
         pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
         pd.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER; // reversed-Z
         pd.DSVFormat = kDepthFormat;
     }
     pd.InputLayout = {layout.data(), static_cast<UINT>(layout.size())};
     pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    pd.NumRenderTargets = 1;
-    pd.RTVFormats[0] = scene ? kSceneFormat : kOverlayFormat;
+    pd.NumRenderTargets = shadow ? 0 : 1;
+    pd.RTVFormats[0] = shadow ? DXGI_FORMAT_UNKNOWN : scene ? kSceneFormat : kOverlayFormat;
     pd.SampleDesc.Count = 1;
     ComPtr<ID3D12PipelineState> pso;
     HR(m->device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pso)));
@@ -958,6 +1000,15 @@ void CommandList::beginTarget(RenderTarget target, const f32 clearColor[4], f32 
     Device::Impl* m = m_device->impl();
     ID3D12GraphicsCommandList* list = m->list.Get();
     const Device::Impl::TargetEntry& t = m->targets[target.id - 1];
+    if (t.depthOnly) { // 그림자 맵: 깊이만 묶고 지운다
+        const D3D12_RESOURCE_BARRIER toDepth =
+            transition(t.depth.Get(), toD3d(TextureState::ShaderRead), D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        list->ResourceBarrier(1, &toDepth);
+        const D3D12_CPU_DESCRIPTOR_HANDLE dsv = t.dsvHeap->GetCPUDescriptorHandleForHeapStart();
+        list->OMSetRenderTargets(0, nullptr, FALSE, &dsv);
+        list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, clearDepth, 0, 0, nullptr);
+        return;
+    }
     const D3D12_RESOURCE_BARRIER toRender = transition(m->textures[t.texture - 1].resource.Get(), toD3d(TextureState::ShaderRead),
                                                        D3D12_RESOURCE_STATE_RENDER_TARGET);
     list->ResourceBarrier(1, &toRender);
@@ -971,8 +1022,9 @@ void CommandList::beginTarget(RenderTarget target, const f32 clearColor[4], f32 
 void CommandList::endTarget(RenderTarget target) {
     Device::Impl* m = m_device->impl();
     const Device::Impl::TargetEntry& t = m->targets[target.id - 1];
-    const D3D12_RESOURCE_BARRIER toRead = transition(m->textures[t.texture - 1].resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
-                                                     toD3d(TextureState::ShaderRead));
+    const D3D12_RESOURCE_BARRIER toRead =
+        transition(m->textures[t.texture - 1].resource.Get(),
+                   t.depthOnly ? D3D12_RESOURCE_STATE_DEPTH_WRITE : D3D12_RESOURCE_STATE_RENDER_TARGET, toD3d(TextureState::ShaderRead));
     m->list->ResourceBarrier(1, &toRead);
 }
 

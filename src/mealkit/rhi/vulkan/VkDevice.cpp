@@ -672,7 +672,8 @@ void Device::shutdown() {
     if (m->device) {
         vkDeviceWaitIdle(m->device);
         for (VkPipeline p : m->pipelines) vkDestroyPipeline(m->device, p, nullptr);
-        for (Impl::TargetEntry& t : m->targets) { // 색 이미지는 textures가 지운다
+        for (Impl::TargetEntry& t : m->targets) { // 색 이미지는 textures가 지운다 (깊이만 대상은 깊이도)
+            if (t.depthOnly) continue;
             vkDestroyImageView(m->device, t.sceneView, nullptr);
             vkDestroyImageView(m->device, t.depthView, nullptr);
             vmaDestroyImage(m->allocator, t.depthImage, t.depthAllocation);
@@ -850,6 +851,49 @@ RenderTarget Device::createRenderTarget(u32 width, u32 height) {
     return {static_cast<u32>(m->targets.size())};
 }
 
+RenderTarget Device::createDepthTarget(u32 width, u32 height) {
+    VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = kDepthFormat;
+    ici.extent = {width, height, 1};
+    ici.mipLevels = 1;
+    ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    Impl::TextureEntry depth;
+    VK(vmaCreateImage(m->allocator, &ici, &aci, &depth.image, &depth.allocation, nullptr));
+    depth.view = createView(m->device, depth.image, kDepthFormat, VK_IMAGE_ASPECT_DEPTH_BIT);
+
+    VkCommandBuffer cmd = m->beginImmediate(); // DX12처럼 셰이더가 읽는 배치로 시작한다
+    imageBarrier(cmd, depth.image, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    m->endImmediate(cmd);
+
+    depth.slot = m->allocTextureSlot();
+    const VkDescriptorImageInfo imageInfo{VK_NULL_HANDLE, depth.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = m->descriptorSet;
+    write.dstBinding = 1;
+    write.dstArrayElement = depth.slot;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    write.pImageInfo = &imageInfo;
+    vkUpdateDescriptorSets(m->device, 1, &write, 0, nullptr);
+
+    Impl::TargetEntry target;
+    target.depthOnly = true;
+    target.width = width;
+    target.height = height;
+    target.depthImage = depth.image; // 이미지·뷰는 textures 쪽이 갖는다 (지우지 않는다)
+    target.depthView = depth.view;
+    m->textures.push_back(depth);
+    target.texture = static_cast<u32>(m->textures.size());
+    m->targets.push_back(target);
+    return {static_cast<u32>(m->targets.size())};
+}
+
 Texture Device::renderTargetTexture(RenderTarget target) const { return {target ? m->targets[target.id - 1].texture : 0}; }
 
 Texture Device::createTexture(const TextureInit& init) {
@@ -974,9 +1018,9 @@ Pipeline Device::createPipeline(const PipelineDesc& desc) {
     raster.lineWidth = 1.0f;
     VkPipelineMultisampleStateCreateInfo multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
     multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-    const bool scene = desc.target == Target::Scene;
+    const bool scene = desc.target == Target::Scene, shadow = desc.target == Target::Shadow;
     VkPipelineDepthStencilStateCreateInfo depth{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
-    if (scene && desc.depthTest) {
+    if ((scene && desc.depthTest) || shadow) {
         depth.depthTestEnable = VK_TRUE;
         depth.depthWriteEnable = VK_TRUE;
         depth.depthCompareOp = VK_COMPARE_OP_GREATER; // reversed-Z
@@ -995,7 +1039,7 @@ Pipeline Device::createPipeline(const PipelineDesc& desc) {
         blend.colorBlendOp = blend.alphaBlendOp = VK_BLEND_OP_ADD;
     }
     VkPipelineColorBlendStateCreateInfo colorBlend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-    colorBlend.attachmentCount = 1;
+    colorBlend.attachmentCount = shadow ? 0 : 1;
     colorBlend.pAttachments = &blend;
     const VkDynamicState dynamics[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
     VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
@@ -1003,9 +1047,9 @@ Pipeline Device::createPipeline(const PipelineDesc& desc) {
     dynamic.pDynamicStates = dynamics;
     const VkFormat colorFormat = scene ? m->sceneFormat : m->swapchainFormat;
     VkPipelineRenderingCreateInfo rendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
-    rendering.colorAttachmentCount = 1;
+    rendering.colorAttachmentCount = shadow ? 0 : 1;
     rendering.pColorAttachmentFormats = &colorFormat;
-    rendering.depthAttachmentFormat = scene ? kDepthFormat : VK_FORMAT_UNDEFINED;
+    rendering.depthAttachmentFormat = scene || shadow ? kDepthFormat : VK_FORMAT_UNDEFINED;
 
     VkGraphicsPipelineCreateInfo ci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &rendering};
     ci.stageCount = 2;
@@ -1217,6 +1261,23 @@ void CommandList::beginTarget(RenderTarget target, const f32 clearColor[4], f32 
     m->endRendering();
     VkCommandBuffer list = m->current();
     const Device::Impl::TargetEntry& t = m->targets[target.id - 1];
+    if (t.depthOnly) { // 그림자 맵: 깊이만 묶고 지운다 (깊이는 다음에 셰이더가 읽으므로 저장한다)
+        imageBarrier(list, t.depthImage, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+        VkRenderingAttachmentInfo depth{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+        depth.imageView = t.depthView;
+        depth.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+        depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depth.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        depth.clearValue.depthStencil.depth = clearDepth;
+        VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
+        ri.renderArea = {{0, 0}, {t.width, t.height}};
+        ri.layerCount = 1;
+        ri.pDepthAttachment = &depth;
+        vkCmdBeginRendering(list, &ri);
+        m->bound = Device::Impl::Bound::Target;
+        return;
+    }
     imageBarrier(list, m->textures[t.texture - 1].image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     imageBarrier(list, t.depthImage, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
@@ -1246,8 +1307,12 @@ void CommandList::endTarget(RenderTarget target) {
     Device::Impl* m = m_device->impl();
     m->endRendering();
     const Device::Impl::TargetEntry& t = m->targets[target.id - 1];
-    imageBarrier(m->current(), m->textures[t.texture - 1].image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if (t.depthOnly)
+        imageBarrier(m->current(), t.depthImage, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    else
+        imageBarrier(m->current(), m->textures[t.texture - 1].image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
 void CommandList::beginTimer(u32 timer) {

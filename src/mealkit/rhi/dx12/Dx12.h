@@ -89,6 +89,7 @@ struct Device::Impl {
         u32 texture = 0; // textures 번호 (Texture::id)
         ComPtr<ID3D12Resource> depth;
         ComPtr<ID3D12DescriptorHeap> rtvHeap, dsvHeap;
+        bool depthOnly = false; // createDepthTarget: depth가 곧 textures[texture - 1] (R32 SRV)
     };
     std::vector<TargetEntry> targets;
     std::vector<ComPtr<ID3D12PipelineState>> pipelines;

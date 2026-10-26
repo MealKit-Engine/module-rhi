@@ -102,6 +102,7 @@ struct ShaderCode {
 enum class Target : u8 {
     Scene,   // 백버퍼 sRGB 뷰(셰이더는 선형으로 쓴다) + 깊이 D32 (reversed-Z: GREATER)
     Overlay, // 백버퍼 감마 변환 없는 뷰, 깊이 없음 (UI는 이미 sRGB 색)
+    Shadow,  // 깊이만 대상(createDepthTarget, 그림자 맵): 색 없음, 깊이 D32 (reversed-Z: GREATER). 픽셀 셰이더는 버리기(알파 마스크)만
 };
 
 struct PipelineDesc {
@@ -161,7 +162,7 @@ public:
     // 백버퍼를 감마 변환 없는 뷰로 다시 묶는다 (지우지 않는다)
     void beginOverlay();
     // 오프스크린 대상을 묶고 지운다 (장면 파이프라인으로 그린다). 다 그리면 endTarget으로 셰이더가 읽는 상태로 돌린다.
-    // 그 뒤 백버퍼에 그리려면 beginScene/beginOverlay를 다시 부른다
+    // 그 뒤 백버퍼에 그리려면 beginScene/beginOverlay를 다시 부른다. 깊이만 대상은 clearColor를 쓰지 않는다
     void beginTarget(RenderTarget target, const f32 clearColor[4], f32 clearDepth);
     void endTarget(RenderTarget target);
     void setViewport(f32 x, f32 y, f32 width, f32 height); // 백버퍼 픽셀, 왼쪽 위 원점 (가위 영역도 같이)
@@ -210,7 +211,9 @@ public:
     u32 textureIndex(Texture texture) const; // g_textures[] 번호
     // 오프스크린 대상 (만들 때 한 번, GPU를 기다린다. 지우지 않으므로 크기를 정해 하나 만들어 계속 쓴다)
     RenderTarget createRenderTarget(u32 width, u32 height);
-    Texture renderTargetTexture(RenderTarget target) const; // 색 (처음 상태 ShaderRead)
+    // 깊이만 있는 오프스크린 대상 (그림자 맵, Target::Shadow 파이프라인). renderTargetTexture는 그 깊이를 R32 float로 읽는다
+    RenderTarget createDepthTarget(u32 width, u32 height);
+    Texture renderTargetTexture(RenderTarget target) const; // 색 (깊이만 대상은 깊이, 처음 상태 ShaderRead)
     Pipeline createPipeline(const PipelineDesc& desc);
     // 같은 핸들의 파이프라인을 새 desc로 바꾼다 (셰이더 핫 리로드). GPU를 기다리므로 프레임 밖에서만 부른다
     bool recreatePipeline(Pipeline pipeline, const PipelineDesc& desc);

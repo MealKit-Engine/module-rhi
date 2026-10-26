@@ -98,6 +98,7 @@ struct Device::Impl {
         VmaAllocation depthAllocation = VK_NULL_HANDLE;
         VkImageView depthView = VK_NULL_HANDLE;
         u32 width = 0, height = 0;
+        bool depthOnly = false; // createDepthTarget: 깊이 이미지가 곧 textures[texture - 1]
     };
     std::vector<TargetEntry> targets;
     std::vector<std::pair<u32, u64>> imguiTextures; // Texture::id → 디버그 UI 서술자 세트 (imguiTextureId)

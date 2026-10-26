@@ -201,7 +201,7 @@ VkInstance createInstance(bool withSurface, bool validation, bool* debugUtils) {
 
 // 이미지 배치 바꾸기 (synchronization2). 프레임에 몇 번뿐이라 단계는 넓게 잡는다
 void imageBarrier(VkCommandBuffer cmd, VkImage image, VkImageAspectFlags aspect, VkImageLayout from, VkImageLayout to,
-                  u32 mipLevels = 1) {
+                  u32 mipLevels = 1, u32 layers = 1) {
     VkImageMemoryBarrier2 b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
     b.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
     b.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
@@ -211,7 +211,7 @@ void imageBarrier(VkCommandBuffer cmd, VkImage image, VkImageAspectFlags aspect,
     b.newLayout = to;
     b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     b.image = image;
-    b.subresourceRange = {aspect, 0, mipLevels, 0, 1};
+    b.subresourceRange = {aspect, 0, mipLevels, 0, layers};
     VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
     dep.imageMemoryBarrierCount = 1;
     dep.pImageMemoryBarriers = &b;
@@ -236,6 +236,7 @@ VkFormat toVk(Format f) {
     case Format::Bc7Unorm: return VK_FORMAT_BC7_UNORM_BLOCK;
     case Format::Bc7Srgb: return VK_FORMAT_BC7_SRGB_BLOCK;
     case Format::Bc5Unorm: return VK_FORMAT_BC5_UNORM_BLOCK;
+    case Format::Rgb9e5: return VK_FORMAT_E5B9G9R9_UFLOAT_PACK32;
     default: return VK_FORMAT_R8G8B8A8_UNORM;
     }
 }
@@ -545,24 +546,25 @@ bool Device::init(const DeviceDesc& desc) {
     sci.anisotropyEnable = m->samplerAnisotropy ? VK_TRUE : VK_FALSE;
     sci.maxAnisotropy = 8.0f;
     VK(vkCreateSampler(m->device, &sci, nullptr, &m->linearWrap));
-    VkDescriptorSetLayoutBinding bindings[4] = {};
+    VkDescriptorSetLayoutBinding bindings[5] = {};
     bindings[0] = {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kMaxBuffers, VK_SHADER_STAGE_ALL_GRAPHICS, nullptr};
     bindings[1] = {1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMaxTextures, VK_SHADER_STAGE_ALL_GRAPHICS, nullptr};
     bindings[2] = {2, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_ALL_GRAPHICS, &m->linearClamp};
     bindings[3] = {3, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_ALL_GRAPHICS, &m->linearWrap};
+    bindings[4] = {4, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMaxTextures, VK_SHADER_STAGE_ALL_GRAPHICS, nullptr}; // 큐브 (텍스처와 같은 번호)
     const VkDescriptorBindingFlags bindless =
         VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
-    const VkDescriptorBindingFlags bindingFlags[4] = {bindless, bindless, 0, 0};
+    const VkDescriptorBindingFlags bindingFlags[5] = {bindless, bindless, 0, 0, bindless};
     VkDescriptorSetLayoutBindingFlagsCreateInfo flagsInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO};
-    flagsInfo.bindingCount = 4;
+    flagsInfo.bindingCount = 5;
     flagsInfo.pBindingFlags = bindingFlags;
     VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, &flagsInfo};
     li.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
-    li.bindingCount = 4;
+    li.bindingCount = 5;
     li.pBindings = bindings;
     VK(vkCreateDescriptorSetLayout(m->device, &li, nullptr, &m->setLayout));
     const VkDescriptorPoolSize sizes[3] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kMaxBuffers},
-                                           {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMaxTextures},
+                                           {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMaxTextures * 2},
                                            {VK_DESCRIPTOR_TYPE_SAMPLER, 2}};
     VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pi.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
@@ -855,28 +857,40 @@ Texture Device::createTexture(const TextureInit& init) {
     VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     ici.imageType = VK_IMAGE_TYPE_2D;
     ici.format = toVk(init.format);
+    const u32 layers = init.cube ? 6u : 1u;
     ici.extent = {init.width, init.height, 1};
     ici.mipLevels = init.mipLevels;
-    ici.arrayLayers = 1;
+    ici.arrayLayers = layers;
+    ici.flags = init.cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
     ici.samples = VK_SAMPLE_COUNT_1_BIT;
     ici.tiling = VK_IMAGE_TILING_OPTIMAL;
     ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     VmaAllocationCreateInfo aci{};
     aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
     VK(vmaCreateImage(m->allocator, &ici, &aci, &entry.image, &entry.allocation, nullptr));
-    entry.view = createView(m->device, entry.image, ici.format, VK_IMAGE_ASPECT_COLOR_BIT, init.mipLevels);
-
-    // 밉을 빈틈 없이 차례로 담은 스테이징 버퍼 하나 → 밉마다 복사 (오프셋은 블록·텍셀 크기의 배수)
-    u64 total = 0;
-    std::vector<VkBufferImageCopy> regions(init.mipLevels);
-    for (u32 mip = 0; mip < init.mipLevels; ++mip) {
-        const u32 w = std::max(1u, init.width >> mip), h = std::max(1u, init.height >> mip);
-        VkBufferImageCopy& r = regions[mip];
-        r.bufferOffset = total;
-        r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, mip, 0, 1};
-        r.imageExtent = {w, h, 1};
-        total += textureMipBytes(init.format, w, h);
+    if (init.cube) {
+        VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        vci.image = entry.image;
+        vci.viewType = VK_IMAGE_VIEW_TYPE_CUBE;
+        vci.format = ici.format;
+        vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, init.mipLevels, 0, 6};
+        VK(vkCreateImageView(m->device, &vci, nullptr, &entry.view));
+    } else {
+        entry.view = createView(m->device, entry.image, ici.format, VK_IMAGE_ASPECT_COLOR_BIT, init.mipLevels);
     }
+
+    // 면마다 밉을 빈틈 없이 차례로 담은 스테이징 버퍼 하나 → 하위 자원마다 복사 (오프셋은 블록·텍셀 크기의 배수)
+    u64 total = 0;
+    std::vector<VkBufferImageCopy> regions(init.mipLevels * layers);
+    for (u32 layer = 0; layer < layers; ++layer)
+        for (u32 mip = 0; mip < init.mipLevels; ++mip) {
+            const u32 w = std::max(1u, init.width >> mip), h = std::max(1u, init.height >> mip);
+            VkBufferImageCopy& r = regions[layer * init.mipLevels + mip];
+            r.bufferOffset = total;
+            r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, mip, layer, 1};
+            r.imageExtent = {w, h, 1};
+            total += textureMipBytes(init.format, w, h);
+        }
     VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bci.size = total;
     bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
@@ -892,10 +906,11 @@ Texture Device::createTexture(const TextureInit& init) {
 
     VkCommandBuffer cmd = m->beginImmediate();
     imageBarrier(cmd, entry.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                 init.mipLevels);
-    vkCmdCopyBufferToImage(cmd, staging, entry.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, init.mipLevels, regions.data());
+                 init.mipLevels, layers);
+    vkCmdCopyBufferToImage(cmd, staging, entry.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, static_cast<u32>(regions.size()),
+                           regions.data());
     imageBarrier(cmd, entry.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, init.mipLevels);
+                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, init.mipLevels, layers);
     m->endImmediate(cmd);
     vmaDestroyBuffer(m->allocator, staging, stagingAllocation);
 
@@ -903,7 +918,7 @@ Texture Device::createTexture(const TextureInit& init) {
     const VkDescriptorImageInfo imageInfo{VK_NULL_HANDLE, entry.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     write.dstSet = m->descriptorSet;
-    write.dstBinding = 1;
+    write.dstBinding = init.cube ? 4u : 1u;
     write.dstArrayElement = entry.slot;
     write.descriptorCount = 1;
     write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;

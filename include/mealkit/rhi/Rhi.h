@@ -14,6 +14,7 @@
 //   푸시 상수 64바이트 (HLSL `[[vk::push_constant]] ConstantBuffer<T> : register(b0)`)
 //   버퍼 배열 `ByteAddressBuffer g_buffers[] : register(t0, space1)` ([[vk::binding(0, 0)]]) — bufferIndex()
 //   텍스처 배열 `Texture2D g_textures[] : register(t0, space2)` ([[vk::binding(1, 0)]]) — textureIndex()
+//   큐브 배열 `TextureCube g_cubes[] : register(t0, space3)` ([[vk::binding(4, 0)]]) — 큐브 텍스처의 textureIndex() (같은 번호 공간)
 //   고정 샘플러 `SamplerState g_linearClamp : register(s0)` ([[vk::binding(2, 0)]]),
 //              `SamplerState g_linearWrap : register(s1)` ([[vk::binding(3, 0)]], 이방성 8, 모델 텍스처)
 namespace mealkit::rhi {
@@ -63,7 +64,8 @@ struct RenderTarget {
 };
 
 // 텍스처 형식. Srgb는 읽을 때 선형으로 바꾼다 (색 텍스처). BC는 4×4 블록 압축 (BC7 = 색 16바이트, BC5 = 두 채널 16바이트)
-enum class Format : u8 { R8Unorm, Rgba8Unorm, Rgba8Srgb, Bc7Unorm, Bc7Srgb, Bc5Unorm };
+// Rgb9e5: HDR (공유 지수, 4바이트. 하늘·반사 큐브맵)
+enum class Format : u8 { R8Unorm, Rgba8Unorm, Rgba8Srgb, Bc7Unorm, Bc7Srgb, Bc5Unorm, Rgb9e5 };
 
 inline bool isBlockCompressed(Format f) { return f == Format::Bc7Unorm || f == Format::Bc7Srgb || f == Format::Bc5Unorm; }
 // 밉 하나의 바이트 (줄 사이 빈틈 없음, BC는 블록 줄)
@@ -72,12 +74,14 @@ inline u64 textureMipBytes(Format f, u32 width, u32 height) {
     return static_cast<u64>(width) * height * (f == Format::R8Unorm ? 1u : 4u);
 }
 
-// 내용이 있는 텍스처 (불러올 때 한 번 올리고 GPU를 기다린다). data는 밉 0부터 차례로 textureMipBytes씩
+// 내용이 있는 텍스처 (불러올 때 한 번 올리고 GPU를 기다린다). data는 밉 0부터 차례로 textureMipBytes씩.
+// cube면 면 여섯(+X, -X, +Y, -Y, +Z, -Z)이 차례로, 면마다 밉 0부터 (셰이더는 g_cubes[textureIndex()]로 읽는다)
 struct TextureInit {
     u32 width = 0, height = 0;
     u32 mipLevels = 1;
     Format format = Format::Rgba8Unorm;
     const void* data = nullptr;
+    bool cube = false;
 };
 enum class BufferUsage : u8 { Vertex, Index16, Index32 };
 enum class TextureState : u8 { ShaderRead, CopyDst };

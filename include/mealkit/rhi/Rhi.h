@@ -55,6 +55,12 @@ struct Pipeline {
     u32 id = 0;
     explicit operator bool() const { return id != 0; }
 };
+// 오프스크린 그리기 대상: 색 + 깊이. 형식이 장면(Target::Scene)과 같아 장면 파이프라인을 그대로 쓴다.
+// 색은 sRGB로 쓰이고(셰이더는 선형) Texture로는 감마 변환 없이 읽힌다(UNORM 뷰): 디버그 UI·오버레이에 그대로 띄운다
+struct RenderTarget {
+    u32 id = 0;
+    explicit operator bool() const { return id != 0; }
+};
 
 // 텍스처 형식. Srgb는 읽을 때 선형으로 바꾼다 (색 텍스처). BC는 4×4 블록 압축 (BC7 = 색 16바이트, BC5 = 두 채널 16바이트)
 enum class Format : u8 { R8Unorm, Rgba8Unorm, Rgba8Srgb, Bc7Unorm, Bc7Srgb, Bc5Unorm };
@@ -148,6 +154,10 @@ public:
     void beginScene(const f32 clearColor[4], f32 clearDepth);
     // 백버퍼를 감마 변환 없는 뷰로 다시 묶는다 (지우지 않는다)
     void beginOverlay();
+    // 오프스크린 대상을 묶고 지운다 (장면 파이프라인으로 그린다). 다 그리면 endTarget으로 셰이더가 읽는 상태로 돌린다.
+    // 그 뒤 백버퍼에 그리려면 beginScene/beginOverlay를 다시 부른다
+    void beginTarget(RenderTarget target, const f32 clearColor[4], f32 clearDepth);
+    void endTarget(RenderTarget target);
     void setViewport(f32 x, f32 y, f32 width, f32 height); // 백버퍼 픽셀, 왼쪽 위 원점 (가위 영역도 같이)
     void setPipeline(Pipeline pipeline);
     void pushConstants(const void* data, u32 bytes); // 64바이트까지, 다음 draw에 쓰인다
@@ -192,6 +202,9 @@ public:
     // 밉이 있는 정적 텍스처 (모델 텍스처 캐시). 상태는 ShaderRead
     Texture createTexture(const TextureInit& init);
     u32 textureIndex(Texture texture) const; // g_textures[] 번호
+    // 오프스크린 대상 (만들 때 한 번, GPU를 기다린다. 지우지 않으므로 크기를 정해 하나 만들어 계속 쓴다)
+    RenderTarget createRenderTarget(u32 width, u32 height);
+    Texture renderTargetTexture(RenderTarget target) const; // 색 (처음 상태 ShaderRead)
     Pipeline createPipeline(const PipelineDesc& desc);
     // 같은 핸들의 파이프라인을 새 desc로 바꾼다 (셰이더 핫 리로드). GPU를 기다리므로 프레임 밖에서만 부른다
     bool recreatePipeline(Pipeline pipeline, const PipelineDesc& desc);
@@ -223,5 +236,7 @@ bool imguiInit(Device& device);
 void imguiShutdown(Device& device);
 void imguiNewFrame();
 void imguiRender(Device& device); // ImGui::GetDrawData()를 지금 명령 목록에 그린다 (beginOverlay 뒤)
+// 장치 텍스처를 ImGui::Image로 띄우는 ImTextureID 값 (DX12: GPU 서술자, Vulkan: 디버그 UI 서술자 세트, 처음 부를 때 만든다)
+u64 imguiTextureId(Device& device, Texture texture);
 
 } // namespace mealkit::rhi

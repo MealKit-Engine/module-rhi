@@ -28,11 +28,25 @@ bool imguiInit(Device& device) {
 
 void imguiShutdown(Device& device) {
     device.waitIdle();
+    device.impl()->imguiTextures.clear(); // 서술자 세트는 ImGui 풀과 같이 사라진다
     ImGui_ImplVulkan_Shutdown(); // 사용자 텍스처의 GPU 자원도 지운다
 }
 
 void imguiNewFrame() { ImGui_ImplVulkan_NewFrame(); }
 
 void imguiRender(Device& device) { ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), device.impl()->current()); }
+
+u64 imguiTextureId(Device& device, Texture texture) {
+    if (!texture) return 0;
+    Device::Impl* m = device.impl();
+    for (const auto& [id, set] : m->imguiTextures)
+        if (id == texture.id) return set;
+    // ImGui 백엔드의 풀에서 텍스처 하나짜리 세트 (그 뒤로는 같은 값을 돌려준다)
+    const VkDescriptorSet set = ImGui_ImplVulkan_AddTexture(m->linearClamp, m->textures[texture.id - 1].view,
+                                                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    const u64 value = reinterpret_cast<u64>(set);
+    m->imguiTextures.emplace_back(texture.id, value);
+    return value;
+}
 
 } // namespace mealkit::rhi

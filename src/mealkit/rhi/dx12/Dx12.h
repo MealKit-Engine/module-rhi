@@ -84,6 +84,13 @@ struct Device::Impl {
         u32 slot = 0;
     };
     std::vector<TextureEntry> textures;
+    // 오프스크린 대상: 색은 TYPELESS 자원 하나에 sRGB RTV + UNORM SRV(textures의 한 칸), 깊이는 대상마다 따로
+    struct TargetEntry {
+        u32 texture = 0; // textures 번호 (Texture::id)
+        ComPtr<ID3D12Resource> depth;
+        ComPtr<ID3D12DescriptorHeap> rtvHeap, dsvHeap;
+    };
+    std::vector<TargetEntry> targets;
     std::vector<ComPtr<ID3D12PipelineState>> pipelines;
 
     // GPU 시간: 프레임마다 kQueriesPerFrame칸, 결과는 계속 매핑한 readback 버퍼로 모은다

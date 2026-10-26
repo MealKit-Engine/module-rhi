@@ -45,4 +45,9 @@ void imguiNewFrame() { ImGui_ImplDX12_NewFrame(); }
 
 void imguiRender(Device& device) { ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), device.impl()->list.Get()); }
 
+u64 imguiTextureId(Device& device, Texture texture) {
+    Device::Impl* m = device.impl();
+    return texture ? m->srvGpu(m->textures[texture.id - 1].slot).ptr : 0; // 같은 bindless 힙 (ImGui 백엔드가 이 힙을 묶는다)
+}
+
 } // namespace mealkit::rhi

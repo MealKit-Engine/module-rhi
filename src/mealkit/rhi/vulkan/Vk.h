@@ -90,6 +90,17 @@ struct Device::Impl {
         u32 slot = 0;
     };
     std::vector<TextureEntry> textures;
+    // 오프스크린 대상: 색 이미지 하나(형식 바꿀 수 있음)에 UNORM 읽기 뷰(textures의 한 칸) + sRGB 그리기 뷰, 깊이는 대상마다
+    struct TargetEntry {
+        u32 texture = 0; // textures 번호 (Texture::id)
+        VkImageView sceneView = VK_NULL_HANDLE;
+        VkImage depthImage = VK_NULL_HANDLE;
+        VmaAllocation depthAllocation = VK_NULL_HANDLE;
+        VkImageView depthView = VK_NULL_HANDLE;
+        u32 width = 0, height = 0;
+    };
+    std::vector<TargetEntry> targets;
+    std::vector<std::pair<u32, u64>> imguiTextures; // Texture::id → 디버그 UI 서술자 세트 (imguiTextureId)
     std::vector<VkPipeline> pipelines;
 
     // GPU 시간: 프레임마다 kQueriesPerFrame칸
@@ -105,7 +116,7 @@ struct Device::Impl {
     u32 frameIndex = 0;
     u32 imageIndex = 0;
     bool inFrame = false;
-    enum class Bound : u8 { None, Scene, Overlay } bound = Bound::None;
+    enum class Bound : u8 { None, Scene, Overlay, Target } bound = Bound::None;
     bool imageIsTarget = false; // 이번 프레임에 백버퍼를 그리기 대상 배치로 바꿨다
     GpuInfo gpu;
     std::string initError;

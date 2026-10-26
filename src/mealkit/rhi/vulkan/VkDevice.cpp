@@ -670,6 +670,11 @@ void Device::shutdown() {
     if (m->device) {
         vkDeviceWaitIdle(m->device);
         for (VkPipeline p : m->pipelines) vkDestroyPipeline(m->device, p, nullptr);
+        for (Impl::TargetEntry& t : m->targets) { // 색 이미지는 textures가 지운다
+            vkDestroyImageView(m->device, t.sceneView, nullptr);
+            vkDestroyImageView(m->device, t.depthView, nullptr);
+            vmaDestroyImage(m->allocator, t.depthImage, t.depthAllocation);
+        }
         for (Impl::TextureEntry& t : m->textures) {
             vkDestroyImageView(m->device, t.view, nullptr);
             vmaDestroyImage(m->allocator, t.image, t.allocation);
@@ -783,6 +788,67 @@ Texture Device::createTexture(u32 width, u32 height, Format format) {
     m->textures.push_back(entry);
     return {static_cast<u32>(m->textures.size())};
 }
+
+RenderTarget Device::createRenderTarget(u32 width, u32 height) {
+    // 색: 스왑체인과 같은 UNORM 형식 + 장면의 sRGB 뷰 (장면 파이프라인을 그대로 쓴다)
+    const VkFormat formats[2] = {m->swapchainFormat, m->sceneFormat};
+    VkImageFormatListCreateInfo formatList{VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO};
+    formatList.viewFormatCount = 2;
+    formatList.pViewFormats = formats;
+    VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, &formatList};
+    ici.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = m->swapchainFormat;
+    ici.extent = {width, height, 1};
+    ici.mipLevels = 1;
+    ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    Impl::TextureEntry color;
+    VK(vmaCreateImage(m->allocator, &ici, &aci, &color.image, &color.allocation, nullptr));
+    color.view = createView(m->device, color.image, m->swapchainFormat, VK_IMAGE_ASPECT_COLOR_BIT);
+    Impl::TargetEntry target;
+    target.width = width;
+    target.height = height;
+    target.sceneView = createView(m->device, color.image, m->sceneFormat, VK_IMAGE_ASPECT_COLOR_BIT);
+
+    VkImageCreateInfo di{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    di.imageType = VK_IMAGE_TYPE_2D;
+    di.format = kDepthFormat;
+    di.extent = {width, height, 1};
+    di.mipLevels = 1;
+    di.arrayLayers = 1;
+    di.samples = VK_SAMPLE_COUNT_1_BIT;
+    di.tiling = VK_IMAGE_TILING_OPTIMAL;
+    di.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    VK(vmaCreateImage(m->allocator, &di, &aci, &target.depthImage, &target.depthAllocation, nullptr));
+    target.depthView = createView(m->device, target.depthImage, kDepthFormat, VK_IMAGE_ASPECT_DEPTH_BIT);
+
+    // DX12처럼 셰이더가 읽는 배치로 시작한다
+    VkCommandBuffer cmd = m->beginImmediate();
+    imageBarrier(cmd, color.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    m->endImmediate(cmd);
+
+    color.slot = m->allocTextureSlot();
+    const VkDescriptorImageInfo imageInfo{VK_NULL_HANDLE, color.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = m->descriptorSet;
+    write.dstBinding = 1;
+    write.dstArrayElement = color.slot;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    write.pImageInfo = &imageInfo;
+    vkUpdateDescriptorSets(m->device, 1, &write, 0, nullptr);
+    m->textures.push_back(color);
+    target.texture = static_cast<u32>(m->textures.size());
+    m->targets.push_back(target);
+    return {static_cast<u32>(m->targets.size())};
+}
+
+Texture Device::renderTargetTexture(RenderTarget target) const { return {target ? m->targets[target.id - 1].texture : 0}; }
 
 Texture Device::createTexture(const TextureInit& init) {
     Impl::TextureEntry entry;
@@ -1125,6 +1191,44 @@ void CommandList::beginScene(const f32 clearColor[4], f32 clearDepth) {
 }
 
 void CommandList::beginOverlay() { m_device->impl()->beginRendering(Device::Impl::Bound::Overlay, nullptr, 0.0f); }
+
+void CommandList::beginTarget(RenderTarget target, const f32 clearColor[4], f32 clearDepth) {
+    Device::Impl* m = m_device->impl();
+    m->endRendering();
+    VkCommandBuffer list = m->current();
+    const Device::Impl::TargetEntry& t = m->targets[target.id - 1];
+    imageBarrier(list, m->textures[t.texture - 1].image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    imageBarrier(list, t.depthImage, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+    VkRenderingAttachmentInfo color{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    color.imageView = t.sceneView;
+    color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    std::memcpy(color.clearValue.color.float32, clearColor, sizeof(f32) * 4);
+    VkRenderingAttachmentInfo depth{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    depth.imageView = t.depthView;
+    depth.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+    depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depth.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depth.clearValue.depthStencil.depth = clearDepth;
+    VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
+    ri.renderArea = {{0, 0}, {t.width, t.height}};
+    ri.layerCount = 1;
+    ri.colorAttachmentCount = 1;
+    ri.pColorAttachments = &color;
+    ri.pDepthAttachment = &depth;
+    vkCmdBeginRendering(list, &ri);
+    m->bound = Device::Impl::Bound::Target;
+}
+
+void CommandList::endTarget(RenderTarget target) {
+    Device::Impl* m = m_device->impl();
+    m->endRendering();
+    const Device::Impl::TargetEntry& t = m->targets[target.id - 1];
+    imageBarrier(m->current(), m->textures[t.texture - 1].image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+}
 
 void CommandList::beginTimer(u32 timer) {
     Device::Impl& d = *m_device->impl();

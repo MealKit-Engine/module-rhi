@@ -888,7 +888,7 @@ Pipeline Device::createPipeline(const PipelineDesc& desc) {
     viewport.scissorCount = 1;
     VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
     raster.polygonMode = desc.wireframe && m->fillModeNonSolid ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
-    raster.cullMode = desc.cullBack ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE;
+    raster.cullMode = desc.cullFront ? VK_CULL_MODE_FRONT_BIT : desc.cullBack ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE;
     raster.frontFace = VK_FRONT_FACE_CLOCKWISE; // 뷰포트를 뒤집어(setViewport) 화면 좌표가 DX12와 같다
     raster.lineWidth = 1.0f;
     VkPipelineMultisampleStateCreateInfo multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};

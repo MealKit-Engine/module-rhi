@@ -653,7 +653,7 @@ Pipeline Device::createPipeline(const PipelineDesc& desc) {
     b.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     pd.SampleMask = UINT_MAX;
     pd.RasterizerState.FillMode = desc.wireframe ? D3D12_FILL_MODE_WIREFRAME : D3D12_FILL_MODE_SOLID;
-    pd.RasterizerState.CullMode = desc.cullBack ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
+    pd.RasterizerState.CullMode = desc.cullFront ? D3D12_CULL_MODE_FRONT : desc.cullBack ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
     pd.RasterizerState.DepthClipEnable = TRUE;
     const bool scene = desc.target == Target::Scene;
     if (scene) {

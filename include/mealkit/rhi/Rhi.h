@@ -100,6 +100,7 @@ struct PipelineDesc {
     u32 vertexStride = 0;
     Target target = Target::Scene;
     bool cullBack = true;       // 시계 방향이 앞면 (DX12 기본)
+    bool cullFront = false;     // 앞면을 버린다 (외곽선의 뒤집은 껍질). cullBack보다 먼저
     bool premultipliedBlend = false;
     // 에디터 보기 모드용 (render::DebugView): 선으로 그리기, 더하기 섞기(겹친 수 = 밝기), 깊이 시험·쓰기 끄기
     bool wireframe = false; // Vulkan은 fillModeNonSolid가 없으면 면으로 그린다

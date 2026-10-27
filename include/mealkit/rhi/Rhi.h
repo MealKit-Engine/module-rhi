@@ -56,8 +56,7 @@ struct Pipeline {
     u32 id = 0;
     explicit operator bool() const { return id != 0; }
 };
-// 오프스크린 그리기 대상: 색 + 깊이. 형식이 장면(Target::Scene)과 같아 장면 파이프라인을 그대로 쓴다.
-// 색은 sRGB로 쓰이고(셰이더는 선형) Texture로는 감마 변환 없이 읽힌다(UNORM 뷰): 디버그 UI·오버레이에 그대로 띄운다
+// 오프스크린 그리기 대상 (TargetKind가 형식을 정한다, 그 형식의 파이프라인 Target으로 그린다). 깊이만 대상은 createDepthTarget
 struct RenderTarget {
     u32 id = 0;
     explicit operator bool() const { return id != 0; }
@@ -99,10 +98,19 @@ struct ShaderCode {
     size_t size = 0;
 };
 
+// 파이프라인이 그리는 대상의 형식 (docs/DECISIONS.md 2026-10-27 "포스트 프로세싱")
 enum class Target : u8 {
-    Scene,   // 백버퍼 sRGB 뷰(셰이더는 선형으로 쓴다) + 깊이 D32 (reversed-Z: GREATER)
-    Overlay, // 백버퍼 감마 변환 없는 뷰, 깊이 없음 (UI는 이미 sRGB 색)
+    Scene,   // HDR 장면 대상(TargetKind::Scene): 색 R11G11B10F(선형) + 깊이 D32 (reversed-Z: GREATER)
+    Hdr,     // HDR 색만(TargetKind::Hdr, 블룸 사슬): R11G11B10F, 깊이 없음
+    Overlay, // 8비트 색, 깊이 없음: 백버퍼와 TargetKind::Ldr. 감마 변환이 없어 셰이더가 sRGB 값을 쓴다 (포스트·UI)
     Shadow,  // 깊이만 대상(createDepthTarget, 그림자 맵): 색 없음, 깊이 D32 (reversed-Z: GREATER). 픽셀 셰이더는 버리기(알파 마스크)만
+};
+
+// 오프스크린 대상의 종류. 색은 셰이더가 읽는 Texture(renderTargetTexture)이기도 하다
+enum class TargetKind : u8 {
+    Scene, // 장면 (Target::Scene): HDR 색 + 깊이
+    Hdr,   // HDR 색만 (Target::Hdr)
+    Ldr,   // 8비트 색만 (Target::Overlay, 백버퍼와 같은 형식): sRGB 값을 그대로 읽는다 (디버그 UI·캡처)
 };
 
 struct PipelineDesc {
@@ -128,8 +136,8 @@ struct DeviceDesc {
     bool gpuCapture = false; // 장치를 만들기 전에 RenderDoc·PIX를 불러온다 (rhi/GpuCapture.h, 개발 빌드)
 };
 
-// 캡처한 백버퍼 (RGBA8, 줄 순서대로). source가 있으면 백버퍼 대신 그 오프스크린 대상을 읽는다 (반사 프로브 굽기,
-// 값은 sRGB로 쓰인 그대로). 대상은 이번 프레임에 endTarget까지 끝나 있어야 한다
+// 캡처한 백버퍼 (RGBA8, 줄 순서대로). source가 있으면 백버퍼 대신 그 오프스크린 대상(TargetKind::Ldr)을 읽는다
+// (반사 프로브 굽기, 값은 쓰인 sRGB 그대로). 대상은 이번 프레임에 endTarget까지 끝나 있어야 한다
 struct Capture {
     RenderTarget source;
     u32 width = 0, height = 0;
@@ -158,12 +166,11 @@ class Device;
 // 그리기 대상(Scene/Overlay)은 begin*으로 묶고, 복사(copyToTexture)는 묶인 대상을 푼다: 복사 뒤에는 다시 begin*을 부른다.
 class CommandList {
 public:
-    // 백버퍼를 sRGB 뷰 + 깊이로 묶고 지운다 (프레임마다 처음 한 번)
-    void beginScene(const f32 clearColor[4], f32 clearDepth);
-    // 백버퍼를 감마 변환 없는 뷰로 다시 묶는다 (지우지 않는다)
+    // 백버퍼를 묶는다 (Target::Overlay, 감마 변환 없음, 지우지 않는다. 그 프레임 처음이면 내용은 정해지지 않는다: 포스트가 덮는다)
     void beginOverlay();
-    // 오프스크린 대상을 묶고 지운다 (장면 파이프라인으로 그린다). 다 그리면 endTarget으로 셰이더가 읽는 상태로 돌린다.
-    // 그 뒤 백버퍼에 그리려면 beginScene/beginOverlay를 다시 부른다. 깊이만 대상은 clearColor를 쓰지 않는다
+    // 오프스크린 대상을 묶는다. clearColor가 nullptr면 색을 지우지 않고 내용을 그대로 둔다 (포스트 패스, 블룸 더하기 섞기).
+    // 깊이는 늘 clearDepth로 지운다. 다 그리면 endTarget으로 셰이더가 읽는 상태로 돌린다.
+    // 그 뒤 백버퍼에 그리려면 beginOverlay를 다시 부른다. 깊이만 대상은 clearColor를 쓰지 않는다
     void beginTarget(RenderTarget target, const f32 clearColor[4], f32 clearDepth);
     void endTarget(RenderTarget target);
     void setViewport(f32 x, f32 y, f32 width, f32 height); // 백버퍼 픽셀, 왼쪽 위 원점 (가위 영역도 같이)
@@ -210,8 +217,10 @@ public:
     // 밉이 있는 정적 텍스처 (모델 텍스처 캐시). 상태는 ShaderRead
     Texture createTexture(const TextureInit& init);
     u32 textureIndex(Texture texture) const; // g_textures[] 번호
-    // 오프스크린 대상 (만들 때 한 번, GPU를 기다린다. 지우지 않으므로 크기를 정해 하나 만들어 계속 쓴다)
-    RenderTarget createRenderTarget(u32 width, u32 height);
+    // 오프스크린 대상 (만들 때 한 번, GPU를 기다린다). 창 크기를 따르는 대상은 destroyRenderTarget 뒤 새로 만든다
+    RenderTarget createRenderTarget(u32 width, u32 height, TargetKind kind);
+    // GPU를 기다리고 지운다 (프레임 밖에서. 렌더러의 창 크기 대상). 핸들 번호는 다시 쓰지 않는다
+    void destroyRenderTarget(RenderTarget target);
     // 깊이만 있는 오프스크린 대상 (그림자 맵, Target::Shadow 파이프라인). renderTargetTexture는 그 깊이를 R32 float로 읽는다
     RenderTarget createDepthTarget(u32 width, u32 height);
     Texture renderTargetTexture(RenderTarget target) const; // 색 (깊이만 대상은 깊이, 처음 상태 ShaderRead)

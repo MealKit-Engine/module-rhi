@@ -216,37 +216,14 @@ void Device::Impl::createSwapchainResources() {
     for (u32 i = 0; i < kBackBufferCount; ++i) {
         HR(swapchain->GetBuffer(i, IID_PPV_ARGS(&backBuffers[i])));
         D3D12_RENDER_TARGET_VIEW_DESC rd{};
-        rd.Format = kSceneFormat;
+        rd.Format = kOverlayFormat;
         rd.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
         device->CreateRenderTargetView(backBuffers[i].Get(), &rd, {rtv.ptr + i * rtvStride});
-        rd.Format = kOverlayFormat;
-        device->CreateRenderTargetView(backBuffers[i].Get(), &rd, {rtv.ptr + (kBackBufferCount + i) * rtvStride});
     }
-
-    D3D12_RESOURCE_DESC dd{};
-    dd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    dd.Width = width;
-    dd.Height = height;
-    dd.DepthOrArraySize = 1;
-    dd.MipLevels = 1;
-    dd.Format = kDepthFormat;
-    dd.SampleDesc.Count = 1;
-    dd.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
-    D3D12_CLEAR_VALUE clear{};
-    clear.Format = kDepthFormat;
-    clear.DepthStencil.Depth = 0.0f;
-    const D3D12_HEAP_PROPERTIES defaultHeap = heapProperties(D3D12_HEAP_TYPE_DEFAULT);
-    HR(device->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &dd, D3D12_RESOURCE_STATE_DEPTH_WRITE,
-                                       &clear, IID_PPV_ARGS(&depthBuffer)));
-    D3D12_DEPTH_STENCIL_VIEW_DESC dsv{};
-    dsv.Format = kDepthFormat;
-    dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
-    device->CreateDepthStencilView(depthBuffer.Get(), &dsv, dsvHeap->GetCPUDescriptorHandleForHeapStart());
 }
 
 void Device::Impl::releaseSwapchainResources() {
     for (auto& bb : backBuffers) bb.Reset();
-    depthBuffer.Reset();
 }
 
 // 모든 파이프라인이 같이 쓰는 루트 시그니처: 루트 상수(b0) + 버퍼 표(t0, space1) + 텍스처 표(t0, space2) + 샘플러(s0)
@@ -385,12 +362,8 @@ bool Device::init(const DeviceDesc& desc) {
 
     D3D12_DESCRIPTOR_HEAP_DESC rtvDesc{};
     rtvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    rtvDesc.NumDescriptors = kBackBufferCount * 2; // sRGB 뷰 + 오버레이 뷰
+    rtvDesc.NumDescriptors = kBackBufferCount; // 오버레이 뷰
     HR(m->device->CreateDescriptorHeap(&rtvDesc, IID_PPV_ARGS(&m->rtvHeap)));
-    D3D12_DESCRIPTOR_HEAP_DESC dsvDesc{};
-    dsvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
-    dsvDesc.NumDescriptors = 1;
-    HR(m->device->CreateDescriptorHeap(&dsvDesc, IID_PPV_ARGS(&m->dsvHeap)));
     m->rtvStride = m->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 
     D3D12_DESCRIPTOR_HEAP_DESC srvDesc{};
@@ -634,16 +607,16 @@ Texture Device::createTexture(const TextureInit& init) {
 
 u32 Device::textureIndex(Texture texture) const { return m->textures[texture.id - 1].slot - kMaxBuffers; }
 
-RenderTarget Device::createRenderTarget(u32 width, u32 height) {
+RenderTarget Device::createRenderTarget(u32 width, u32 height, TargetKind kind) {
     Impl::TextureEntry color;
-    color.format = DXGI_FORMAT_R8G8B8A8_UNORM; // 읽기 뷰: 감마 변환 없이 (디버그 UI·오버레이에 그대로)
+    color.format = kind == TargetKind::Ldr ? kOverlayFormat : kHdrFormat;
     D3D12_RESOURCE_DESC td{};
     td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     td.Width = width;
     td.Height = height;
     td.DepthOrArraySize = 1;
     td.MipLevels = 1;
-    td.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS; // 쓰기는 sRGB 뷰(장면과 같은 형식), 읽기는 UNORM 뷰
+    td.Format = color.format;
     td.SampleDesc.Count = 1;
     td.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
     // 지우는 색이 쓰는 쪽(조명 프리셋 배경)마다 달라 최적 지우기 값은 주지 않는다
@@ -663,29 +636,42 @@ RenderTarget Device::createRenderTarget(u32 width, u32 height) {
     hd.NumDescriptors = 1;
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
     HR(m->device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&target.rtvHeap)));
-    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
-    HR(m->device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&target.dsvHeap)));
     D3D12_RENDER_TARGET_VIEW_DESC rd{};
-    rd.Format = kSceneFormat;
+    rd.Format = color.format;
     rd.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
     m->device->CreateRenderTargetView(color.resource.Get(), &rd, target.rtvHeap->GetCPUDescriptorHandleForHeapStart());
 
-    D3D12_RESOURCE_DESC dd = td;
-    dd.Format = kDepthFormat;
-    dd.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
-    D3D12_CLEAR_VALUE depthClear{};
-    depthClear.Format = kDepthFormat;
-    HR(m->device->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &dd, D3D12_RESOURCE_STATE_DEPTH_WRITE, &depthClear,
-                                          IID_PPV_ARGS(&target.depth)));
-    D3D12_DEPTH_STENCIL_VIEW_DESC dsv{};
-    dsv.Format = kDepthFormat;
-    dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
-    m->device->CreateDepthStencilView(target.depth.Get(), &dsv, target.dsvHeap->GetCPUDescriptorHandleForHeapStart());
+    if (kind == TargetKind::Scene) {
+        hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+        HR(m->device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&target.dsvHeap)));
+        D3D12_RESOURCE_DESC dd = td;
+        dd.Format = kDepthFormat;
+        dd.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
+        D3D12_CLEAR_VALUE depthClear{};
+        depthClear.Format = kDepthFormat;
+        HR(m->device->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &dd, D3D12_RESOURCE_STATE_DEPTH_WRITE,
+                                              &depthClear, IID_PPV_ARGS(&target.depth)));
+        D3D12_DEPTH_STENCIL_VIEW_DESC dsv{};
+        dsv.Format = kDepthFormat;
+        dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+        m->device->CreateDepthStencilView(target.depth.Get(), &dsv, target.dsvHeap->GetCPUDescriptorHandleForHeapStart());
+    }
 
     m->textures.push_back(std::move(color));
     target.texture = static_cast<u32>(m->textures.size());
     m->targets.push_back(std::move(target));
     return {static_cast<u32>(m->targets.size())};
+}
+
+void Device::destroyRenderTarget(RenderTarget target) {
+    if (!m || !target || target.id > m->targets.size() || m->inFrame) return;
+    Impl::TargetEntry& t = m->targets[target.id - 1];
+    if (!t.texture) return;
+    m->waitIdle();
+    Impl::TextureEntry& color = m->textures[t.texture - 1];
+    m->freeTextureSlot(color.slot);
+    color = {};
+    t = {};
 }
 
 RenderTarget Device::createDepthTarget(u32 width, u32 height) {
@@ -776,7 +762,7 @@ Pipeline Device::createPipeline(const PipelineDesc& desc) {
     pd.InputLayout = {layout.data(), static_cast<UINT>(layout.size())};
     pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     pd.NumRenderTargets = shadow ? 0 : 1;
-    pd.RTVFormats[0] = shadow ? DXGI_FORMAT_UNKNOWN : scene ? kSceneFormat : kOverlayFormat;
+    pd.RTVFormats[0] = shadow ? DXGI_FORMAT_UNKNOWN : desc.target == Target::Overlay ? kOverlayFormat : kHdrFormat;
     pd.SampleDesc.Count = 1;
     ComPtr<ID3D12PipelineState> pso;
     HR(m->device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pso)));
@@ -966,23 +952,6 @@ void CommandList::endTimer(u32 timer) {
     d.list->EndQuery(d.queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, d.queryBase() + 3 + 2 * timer);
 }
 
-void CommandList::beginScene(const f32 clearColor[4], f32 clearDepth) {
-    Device::Impl* m = m_device->impl();
-    ID3D12GraphicsCommandList* list = m->list.Get();
-    if (!m->backBufferIsTarget) {
-        const D3D12_RESOURCE_BARRIER toRender = transition(m->backBuffers[m->backBufferIndex].Get(),
-                                                           D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        list->ResourceBarrier(1, &toRender);
-        m->backBufferIsTarget = true;
-    }
-    const D3D12_CPU_DESCRIPTOR_HANDLE rtv{m->rtvHeap->GetCPUDescriptorHandleForHeapStart().ptr +
-                                          m->backBufferIndex * m->rtvStride};
-    const D3D12_CPU_DESCRIPTOR_HANDLE dsv = m->dsvHeap->GetCPUDescriptorHandleForHeapStart();
-    list->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
-    list->ClearRenderTargetView(rtv, clearColor, 0, nullptr);
-    list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, clearDepth, 0, 0, nullptr);
-}
-
 void CommandList::beginOverlay() {
     Device::Impl* m = m_device->impl();
     ID3D12GraphicsCommandList* list = m->list.Get();
@@ -992,8 +961,7 @@ void CommandList::beginOverlay() {
         list->ResourceBarrier(1, &toRender);
         m->backBufferIsTarget = true;
     }
-    const D3D12_CPU_DESCRIPTOR_HANDLE rtv{m->rtvHeap->GetCPUDescriptorHandleForHeapStart().ptr +
-                                          (kBackBufferCount + m->backBufferIndex) * m->rtvStride};
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtv{m->rtvHeap->GetCPUDescriptorHandleForHeapStart().ptr + m->backBufferIndex * m->rtvStride};
     list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
 }
 
@@ -1014,10 +982,14 @@ void CommandList::beginTarget(RenderTarget target, const f32 clearColor[4], f32 
                                                        D3D12_RESOURCE_STATE_RENDER_TARGET);
     list->ResourceBarrier(1, &toRender);
     const D3D12_CPU_DESCRIPTOR_HANDLE rtv = t.rtvHeap->GetCPUDescriptorHandleForHeapStart();
-    const D3D12_CPU_DESCRIPTOR_HANDLE dsv = t.dsvHeap->GetCPUDescriptorHandleForHeapStart();
-    list->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
-    list->ClearRenderTargetView(rtv, clearColor, 0, nullptr);
-    list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, clearDepth, 0, 0, nullptr);
+    if (t.dsvHeap) {
+        const D3D12_CPU_DESCRIPTOR_HANDLE dsv = t.dsvHeap->GetCPUDescriptorHandleForHeapStart();
+        list->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
+        list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, clearDepth, 0, 0, nullptr);
+    } else {
+        list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    }
+    if (clearColor) list->ClearRenderTargetView(rtv, clearColor, 0, nullptr);
 }
 
 void CommandList::endTarget(RenderTarget target) {

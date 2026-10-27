@@ -92,8 +92,12 @@ std::string missingFeatures(VkPhysicalDevice physical, VkSurfaceKHR surface) {
     need(f13.synchronization2, "synchronization2");
     need(f13.shaderDemoteToHelperInvocation, "demote to helper invocation");
     need(features.features.textureCompressionBC, "BC texture compression");
+    VkFormatProperties hdr{};
+    vkGetPhysicalDeviceFormatProperties(physical, kHdrFormat, &hdr);
+    need((hdr.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT) &&
+             (hdr.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT),
+         "B10G11R11 render target");
     need(hasExtension(physical, VK_KHR_SWAPCHAIN_EXTENSION_NAME), VK_KHR_SWAPCHAIN_EXTENSION_NAME);
-    need(hasExtension(physical, VK_KHR_SWAPCHAIN_MUTABLE_FORMAT_EXTENSION_NAME), VK_KHR_SWAPCHAIN_MUTABLE_FORMAT_EXTENSION_NAME);
     need(findQueueFamily(physical, surface) != UINT32_MAX, surface ? "graphics + present queue" : "graphics queue");
     return missing;
 }
@@ -263,13 +267,7 @@ bool Device::Impl::createSwapchain() {
     u32 imageCount = std::max(caps.minImageCount, 3u);
     if (caps.maxImageCount) imageCount = std::min(imageCount, caps.maxImageCount);
 
-    const VkFormat formats[2] = {swapchainFormat, sceneFormat};
-    VkImageFormatListCreateInfo formatList{VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO};
-    formatList.viewFormatCount = 2;
-    formatList.pViewFormats = formats;
-
-    VkSwapchainCreateInfoKHR ci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, &formatList};
-    ci.flags = VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR;
+    VkSwapchainCreateInfoKHR ci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
     ci.surface = surface;
     ci.minImageCount = imageCount;
     ci.imageFormat = swapchainFormat;
@@ -302,40 +300,20 @@ bool Device::Impl::createSwapchain() {
     for (u32 i = 0; i < count; ++i) {
         SwapImage& s = swapImages[i];
         s.image = images[i];
-        s.sceneView = createView(device, s.image, sceneFormat, VK_IMAGE_ASPECT_COLOR_BIT);
         s.overlayView = createView(device, s.image, swapchainFormat, VK_IMAGE_ASPECT_COLOR_BIT);
         VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
         VK(vkCreateSemaphore(device, &si, nullptr, &s.renderFinished));
     }
-
-    VkImageCreateInfo di{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-    di.imageType = VK_IMAGE_TYPE_2D;
-    di.format = kDepthFormat;
-    di.extent = {width, height, 1};
-    di.mipLevels = 1;
-    di.arrayLayers = 1;
-    di.samples = VK_SAMPLE_COUNT_1_BIT;
-    di.tiling = VK_IMAGE_TILING_OPTIMAL;
-    di.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-    VmaAllocationCreateInfo ai{};
-    ai.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
-    VK(vmaCreateImage(allocator, &di, &ai, &depthImage, &depthAllocation, nullptr));
-    depthView = createView(device, depthImage, kDepthFormat, VK_IMAGE_ASPECT_DEPTH_BIT);
     swapchainDirty = false;
     return true;
 }
 
 void Device::Impl::destroySwapchain() {
     for (SwapImage& s : swapImages) {
-        vkDestroyImageView(device, s.sceneView, nullptr);
         vkDestroyImageView(device, s.overlayView, nullptr);
         vkDestroySemaphore(device, s.renderFinished, nullptr);
     }
     swapImages.clear();
-    if (depthView) vkDestroyImageView(device, depthView, nullptr);
-    if (depthImage) vmaDestroyImage(allocator, depthImage, depthAllocation);
-    depthView = VK_NULL_HANDLE;
-    depthImage = VK_NULL_HANDLE;
     if (swapchain) vkDestroySwapchainKHR(device, swapchain, nullptr);
     swapchain = VK_NULL_HANDLE;
 }
@@ -346,7 +324,7 @@ void Device::Impl::endRendering() {
     bound = Bound::None;
 }
 
-void Device::Impl::beginRendering(Bound target, const f32* clearColor, f32 clearDepth) {
+void Device::Impl::beginOverlay() {
     endRendering();
     VkCommandBuffer list = current();
     const SwapImage& s = swapImages[imageIndex];
@@ -355,29 +333,17 @@ void Device::Impl::beginRendering(Bound target, const f32* clearColor, f32 clear
         imageIsTarget = true;
     }
     VkRenderingAttachmentInfo color{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-    color.imageView = target == Bound::Scene ? s.sceneView : s.overlayView;
+    color.imageView = s.overlayView;
     color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    color.loadOp = clearColor ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+    color.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    if (clearColor) std::memcpy(color.clearValue.color.float32, clearColor, sizeof(f32) * 4);
-    VkRenderingAttachmentInfo depth{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
     ri.renderArea = {{0, 0}, {width, height}};
     ri.layerCount = 1;
     ri.colorAttachmentCount = 1;
     ri.pColorAttachments = &color;
-    if (target == Bound::Scene) {
-        imageBarrier(list, depthImage, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
-                     VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
-        depth.imageView = depthView;
-        depth.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-        depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        depth.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        depth.clearValue.depthStencil.depth = clearDepth;
-        ri.pDepthAttachment = &depth;
-    }
     vkCmdBeginRendering(list, &ri);
-    bound = target;
+    bound = Bound::Overlay;
 }
 
 VkCommandBuffer Device::Impl::beginImmediate() {
@@ -486,7 +452,7 @@ bool Device::init(const DeviceDesc& desc) {
     m->samplerAnisotropy = supported.samplerAnisotropy == VK_TRUE; // 모델 텍스처 샘플러 (없으면 이방성 없이)
     features.features.samplerAnisotropy = supported.samplerAnisotropy;
     features.features.textureCompressionBC = supported.textureCompressionBC; // BC7·BC5 (데스크톱 GPU는 모두 있다)
-    std::vector<const char*> extensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_SWAPCHAIN_MUTABLE_FORMAT_EXTENSION_NAME};
+    std::vector<const char*> extensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
     m->memoryBudget = hasExtension(m->physical, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME); // 선택 (GPU 메모리 숫자)
     if (m->memoryBudget) extensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
     VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &features};
@@ -510,7 +476,7 @@ bool Device::init(const DeviceDesc& desc) {
     if (m->memoryBudget) vi.flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
     VK(vmaCreateAllocator(&vi, &m->allocator));
 
-    // 스왑체인 형식: UNORM(오버레이) + 같은 이미지의 SRGB 뷰(장면). Windows 드라이버는 BGRA가 흔하다
+    // 스왑체인 형식: UNORM (포스트·UI가 sRGB 값을 쓴다). Windows 드라이버는 BGRA가 흔하다
     u32 formatCount = 0;
     vkGetPhysicalDeviceSurfaceFormatsKHR(m->physical, m->surface, &formatCount, nullptr);
     std::vector<VkSurfaceFormatKHR> surfaceFormats(formatCount);
@@ -519,7 +485,6 @@ bool Device::init(const DeviceDesc& desc) {
         for (const VkSurfaceFormatKHR& f : surfaceFormats) {
             if (f.format == want && f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR && !m->swapchainFormat) {
                 m->swapchainFormat = want;
-                m->sceneFormat = want == VK_FORMAT_R8G8B8A8_UNORM ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_B8G8R8A8_SRGB;
                 m->swapchainBgra = want == VK_FORMAT_B8G8R8A8_UNORM;
             }
         }
@@ -673,8 +638,7 @@ void Device::shutdown() {
         vkDeviceWaitIdle(m->device);
         for (VkPipeline p : m->pipelines) vkDestroyPipeline(m->device, p, nullptr);
         for (Impl::TargetEntry& t : m->targets) { // 색 이미지는 textures가 지운다 (깊이만 대상은 깊이도)
-            if (t.depthOnly) continue;
-            vkDestroyImageView(m->device, t.sceneView, nullptr);
+            if (t.depthOnly || !t.depthImage) continue;
             vkDestroyImageView(m->device, t.depthView, nullptr);
             vmaDestroyImage(m->allocator, t.depthImage, t.depthAllocation);
         }
@@ -792,16 +756,11 @@ Texture Device::createTexture(u32 width, u32 height, Format format) {
     return {static_cast<u32>(m->textures.size())};
 }
 
-RenderTarget Device::createRenderTarget(u32 width, u32 height) {
-    // 색: 스왑체인과 같은 UNORM 형식 + 장면의 sRGB 뷰 (장면 파이프라인을 그대로 쓴다)
-    const VkFormat formats[2] = {m->swapchainFormat, m->sceneFormat};
-    VkImageFormatListCreateInfo formatList{VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO};
-    formatList.viewFormatCount = 2;
-    formatList.pViewFormats = formats;
-    VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, &formatList};
-    ici.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+RenderTarget Device::createRenderTarget(u32 width, u32 height, TargetKind kind) {
+    // 색: Ldr은 스왑체인과 같은 UNORM 형식 (Target::Overlay 파이프라인을 그대로 쓴다), 나머지는 HDR
+    VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     ici.imageType = VK_IMAGE_TYPE_2D;
-    ici.format = m->swapchainFormat;
+    ici.format = kind == TargetKind::Ldr ? m->swapchainFormat : kHdrFormat;
     ici.extent = {width, height, 1};
     ici.mipLevels = 1;
     ici.arrayLayers = 1;
@@ -812,23 +771,24 @@ RenderTarget Device::createRenderTarget(u32 width, u32 height) {
     aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
     Impl::TextureEntry color;
     VK(vmaCreateImage(m->allocator, &ici, &aci, &color.image, &color.allocation, nullptr));
-    color.view = createView(m->device, color.image, m->swapchainFormat, VK_IMAGE_ASPECT_COLOR_BIT);
+    color.view = createView(m->device, color.image, ici.format, VK_IMAGE_ASPECT_COLOR_BIT);
     Impl::TargetEntry target;
     target.width = width;
     target.height = height;
-    target.sceneView = createView(m->device, color.image, m->sceneFormat, VK_IMAGE_ASPECT_COLOR_BIT);
 
-    VkImageCreateInfo di{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-    di.imageType = VK_IMAGE_TYPE_2D;
-    di.format = kDepthFormat;
-    di.extent = {width, height, 1};
-    di.mipLevels = 1;
-    di.arrayLayers = 1;
-    di.samples = VK_SAMPLE_COUNT_1_BIT;
-    di.tiling = VK_IMAGE_TILING_OPTIMAL;
-    di.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-    VK(vmaCreateImage(m->allocator, &di, &aci, &target.depthImage, &target.depthAllocation, nullptr));
-    target.depthView = createView(m->device, target.depthImage, kDepthFormat, VK_IMAGE_ASPECT_DEPTH_BIT);
+    if (kind == TargetKind::Scene) {
+        VkImageCreateInfo di{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        di.imageType = VK_IMAGE_TYPE_2D;
+        di.format = kDepthFormat;
+        di.extent = {width, height, 1};
+        di.mipLevels = 1;
+        di.arrayLayers = 1;
+        di.samples = VK_SAMPLE_COUNT_1_BIT;
+        di.tiling = VK_IMAGE_TILING_OPTIMAL;
+        di.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        VK(vmaCreateImage(m->allocator, &di, &aci, &target.depthImage, &target.depthAllocation, nullptr));
+        target.depthView = createView(m->device, target.depthImage, kDepthFormat, VK_IMAGE_ASPECT_DEPTH_BIT);
+    }
 
     // DX12처럼 셰이더가 읽는 배치로 시작한다
     VkCommandBuffer cmd = m->beginImmediate();
@@ -849,6 +809,21 @@ RenderTarget Device::createRenderTarget(u32 width, u32 height) {
     target.texture = static_cast<u32>(m->textures.size());
     m->targets.push_back(target);
     return {static_cast<u32>(m->targets.size())};
+}
+
+void Device::destroyRenderTarget(RenderTarget target) {
+    if (!m || !target || target.id > m->targets.size() || m->inFrame) return;
+    Impl::TargetEntry& t = m->targets[target.id - 1];
+    if (!t.texture || t.depthOnly) return;
+    vkDeviceWaitIdle(m->device);
+    if (t.depthView) vkDestroyImageView(m->device, t.depthView, nullptr);
+    if (t.depthImage) vmaDestroyImage(m->allocator, t.depthImage, t.depthAllocation);
+    Impl::TextureEntry& color = m->textures[t.texture - 1];
+    vkDestroyImageView(m->device, color.view, nullptr);
+    vmaDestroyImage(m->allocator, color.image, color.allocation);
+    m->freeTextureSlots.push_back(color.slot);
+    color = {};
+    t = {};
 }
 
 RenderTarget Device::createDepthTarget(u32 width, u32 height) {
@@ -1046,7 +1021,7 @@ Pipeline Device::createPipeline(const PipelineDesc& desc) {
     VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
     dynamic.dynamicStateCount = 2;
     dynamic.pDynamicStates = dynamics;
-    const VkFormat colorFormat = scene ? m->sceneFormat : m->swapchainFormat;
+    const VkFormat colorFormat = desc.target == Target::Overlay ? m->swapchainFormat : kHdrFormat;
     VkPipelineRenderingCreateInfo rendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
     rendering.colorAttachmentCount = shadow ? 0 : 1;
     rendering.pColorAttachmentFormats = &colorFormat;
@@ -1251,11 +1226,7 @@ GpuMemory Device::gpuMemory() const {
 
 // ---------------------------------------------------------------- CommandList
 
-void CommandList::beginScene(const f32 clearColor[4], f32 clearDepth) {
-    m_device->impl()->beginRendering(Device::Impl::Bound::Scene, clearColor, clearDepth);
-}
-
-void CommandList::beginOverlay() { m_device->impl()->beginRendering(Device::Impl::Bound::Overlay, nullptr, 0.0f); }
+void CommandList::beginOverlay() { m_device->impl()->beginOverlay(); }
 
 void CommandList::beginTarget(RenderTarget target, const f32 clearColor[4], f32 clearDepth) {
     Device::Impl* m = m_device->impl();
@@ -1279,27 +1250,30 @@ void CommandList::beginTarget(RenderTarget target, const f32 clearColor[4], f32 
         m->bound = Device::Impl::Bound::Target;
         return;
     }
-    imageBarrier(list, m->textures[t.texture - 1].image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    const Device::Impl::TextureEntry& image = m->textures[t.texture - 1];
+    imageBarrier(list, image.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    imageBarrier(list, t.depthImage, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
     VkRenderingAttachmentInfo color{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-    color.imageView = t.sceneView;
+    color.imageView = image.view;
     color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    color.loadOp = clearColor ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD; // 지우지 않으면 내용을 그대로 둔다
     color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    std::memcpy(color.clearValue.color.float32, clearColor, sizeof(f32) * 4);
+    if (clearColor) std::memcpy(color.clearValue.color.float32, clearColor, sizeof(f32) * 4);
     VkRenderingAttachmentInfo depth{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-    depth.imageView = t.depthView;
-    depth.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-    depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    depth.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    depth.clearValue.depthStencil.depth = clearDepth;
     VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
     ri.renderArea = {{0, 0}, {t.width, t.height}};
     ri.layerCount = 1;
     ri.colorAttachmentCount = 1;
     ri.pColorAttachments = &color;
-    ri.pDepthAttachment = &depth;
+    if (t.depthImage) {
+        imageBarrier(list, t.depthImage, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+        depth.imageView = t.depthView;
+        depth.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+        depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depth.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        depth.clearValue.depthStencil.depth = clearDepth;
+        ri.pDepthAttachment = &depth;
+    }
     vkCmdBeginRendering(list, &ri);
     m->bound = Device::Impl::Bound::Target;
 }

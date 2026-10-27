@@ -13,6 +13,7 @@ constexpr u32 kMaxBuffers = 16;    // g_buffers[] (바인딩 0)
 constexpr u32 kMaxTextures = 4096; // g_textures[] (바인딩 1)
 constexpr u64 kUploadBytesPerFrame = 8ull << 20;
 constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT;
+constexpr VkFormat kHdrFormat = VK_FORMAT_B10G11R11_UFLOAT_PACK32; // 장면·블룸 대상 (Target::Scene/Hdr, 선형)
 constexpr u32 kQueriesPerFrame = 2 + 2 * kMaxGpuTimers; // 프레임 처음·끝 + 구간마다 처음·끝
 
 void checkVk(VkResult result, const char* expr, const char* file, int line);
@@ -31,21 +32,16 @@ struct Device::Impl {
     VmaAllocator allocator = VK_NULL_HANDLE;
     u32 apiVersion = 0;
 
-    // 스왑체인: 이미지 하나에 뷰 두 개 (sRGB = 장면, UNORM = 오버레이, VK_KHR_swapchain_mutable_format)
+    // 스왑체인: UNORM 뷰 하나 (Target::Overlay, 셰이더가 sRGB 값을 쓴다). 깊이는 장면 대상에 있다
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
-    VkFormat swapchainFormat = VK_FORMAT_UNDEFINED; // UNORM
-    VkFormat sceneFormat = VK_FORMAT_UNDEFINED;     // 같은 이미지의 SRGB
+    VkFormat swapchainFormat = VK_FORMAT_UNDEFINED; // UNORM (Ldr 대상도 이 형식)
     bool swapchainBgra = false;
     struct SwapImage {
         VkImage image = VK_NULL_HANDLE;
-        VkImageView sceneView = VK_NULL_HANDLE;
         VkImageView overlayView = VK_NULL_HANDLE;
         VkSemaphore renderFinished = VK_NULL_HANDLE; // 프레젠트가 기다린다 (이미지마다)
     };
     std::vector<SwapImage> swapImages;
-    VkImage depthImage = VK_NULL_HANDLE;
-    VmaAllocation depthAllocation = VK_NULL_HANDLE;
-    VkImageView depthView = VK_NULL_HANDLE;
     bool swapchainVsync = true;
     bool swapchainDirty = false;
     bool immediateSupported = false;
@@ -90,10 +86,9 @@ struct Device::Impl {
         u32 slot = 0;
     };
     std::vector<TextureEntry> textures;
-    // 오프스크린 대상: 색 이미지 하나(형식 바꿀 수 있음)에 UNORM 읽기 뷰(textures의 한 칸) + sRGB 그리기 뷰, 깊이는 대상마다
+    // 오프스크린 대상: 색 이미지(textures의 한 칸, 읽기·그리기 같은 뷰), 깊이는 TargetKind::Scene만 (대상마다)
     struct TargetEntry {
         u32 texture = 0; // textures 번호 (Texture::id)
-        VkImageView sceneView = VK_NULL_HANDLE;
         VkImage depthImage = VK_NULL_HANDLE;
         VmaAllocation depthAllocation = VK_NULL_HANDLE;
         VkImageView depthView = VK_NULL_HANDLE;
@@ -117,7 +112,7 @@ struct Device::Impl {
     u32 frameIndex = 0;
     u32 imageIndex = 0;
     bool inFrame = false;
-    enum class Bound : u8 { None, Scene, Overlay, Target } bound = Bound::None;
+    enum class Bound : u8 { None, Overlay, Target } bound = Bound::None;
     bool imageIsTarget = false; // 이번 프레임에 백버퍼를 그리기 대상 배치로 바꿨다
     GpuInfo gpu;
     std::string initError;
@@ -128,7 +123,7 @@ struct Device::Impl {
     bool createSwapchain();
     void destroySwapchain();
     void endRendering();
-    void beginRendering(Bound target, const f32* clearColor, f32 clearDepth);
+    void beginOverlay();
     VkCommandBuffer beginImmediate();
     void endImmediate(VkCommandBuffer cmd);
     u32 allocTextureSlot();

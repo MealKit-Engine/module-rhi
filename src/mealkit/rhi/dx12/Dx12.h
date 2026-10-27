@@ -21,8 +21,8 @@ constexpr u64 kUploadBytesPerFrame = 8ull << 20; // 인스턴스 약 17만 개�
 constexpr u32 kMaxBuffers = 16;     // g_buffers[] 칸 (서술자 힙 앞쪽)
 constexpr u32 kMaxTextures = 4096;  // g_textures[] 칸 (그 뒤, 디버그 UI 텍스처도 여기서)
 constexpr DXGI_FORMAT kSwapchainFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
-constexpr DXGI_FORMAT kSceneFormat = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB; // 셰이더는 선형으로 쓰고 하드웨어가 감마 인코딩
-constexpr DXGI_FORMAT kOverlayFormat = DXGI_FORMAT_R8G8B8A8_UNORM;    // UI는 이미 sRGB 색이므로 변환하지 않는다
+constexpr DXGI_FORMAT kHdrFormat = DXGI_FORMAT_R11G11B10_FLOAT;   // 장면·블룸 대상 (Target::Scene/Hdr, 선형)
+constexpr DXGI_FORMAT kOverlayFormat = DXGI_FORMAT_R8G8B8A8_UNORM; // 백버퍼·Ldr 대상: 셰이더가 sRGB 값을 쓴다 (포스트·UI)
 constexpr DXGI_FORMAT kDepthFormat = DXGI_FORMAT_D32_FLOAT;
 constexpr u32 kQueriesPerFrame = 2 + 2 * kMaxGpuTimers; // 프레임 처음·끝 + 구간마다 처음·끝
 
@@ -42,11 +42,9 @@ struct Device::Impl {
     UINT swapchainFlags = 0;
     bool tearingSupported = false;
 
-    ComPtr<ID3D12DescriptorHeap> rtvHeap; // 백버퍼마다 sRGB 뷰 + 오버레이 뷰
-    ComPtr<ID3D12DescriptorHeap> dsvHeap;
+    ComPtr<ID3D12DescriptorHeap> rtvHeap; // 백버퍼마다 오버레이 뷰 하나 (깊이는 장면 대상에 있다)
     UINT rtvStride = 0;
     ComPtr<ID3D12Resource> backBuffers[kBackBufferCount];
-    ComPtr<ID3D12Resource> depthBuffer;
 
     // bindless: 셰이더가 보는 서술자 힙 하나 (버퍼 kMaxBuffers칸 + 텍스처 kMaxTextures칸)
     ComPtr<ID3D12DescriptorHeap> srvHeap;
@@ -84,7 +82,7 @@ struct Device::Impl {
         u32 slot = 0;
     };
     std::vector<TextureEntry> textures;
-    // 오프스크린 대상: 색은 TYPELESS 자원 하나에 sRGB RTV + UNORM SRV(textures의 한 칸), 깊이는 대상마다 따로
+    // 오프스크린 대상: 색(textures의 한 칸)에 RTV + SRV, 깊이는 TargetKind::Scene만 (대상마다 따로)
     struct TargetEntry {
         u32 texture = 0; // textures 번호 (Texture::id)
         ComPtr<ID3D12Resource> depth;

@@ -117,6 +117,7 @@ struct PipelineDesc {
     bool wireframe = false; // Vulkan은 fillModeNonSolid가 없으면 면으로 그린다
     bool additiveBlend = false;
     bool depthTest = true; // Scene 대상만
+    bool depthWrite = true; // 깊이 시험을 해도 쓰지 않는다 (반투명 파티클)
 };
 
 struct DeviceDesc {

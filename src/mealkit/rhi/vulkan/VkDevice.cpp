@@ -1023,7 +1023,7 @@ Pipeline Device::createPipeline(const PipelineDesc& desc) {
     VkPipelineDepthStencilStateCreateInfo depth{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
     if ((scene && desc.depthTest) || shadow) {
         depth.depthTestEnable = VK_TRUE;
-        depth.depthWriteEnable = VK_TRUE;
+        depth.depthWriteEnable = desc.depthWrite || shadow ? VK_TRUE : VK_FALSE;
         depth.depthCompareOp = VK_COMPARE_OP_GREATER; // reversed-Z
     }
     VkPipelineColorBlendAttachmentState blend{};

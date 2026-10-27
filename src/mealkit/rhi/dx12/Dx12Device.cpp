@@ -769,7 +769,7 @@ Pipeline Device::createPipeline(const PipelineDesc& desc) {
     const bool scene = desc.target == Target::Scene, shadow = desc.target == Target::Shadow;
     if (scene || shadow) {
         pd.DepthStencilState.DepthEnable = desc.depthTest || shadow ? TRUE : FALSE;
-        pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+        pd.DepthStencilState.DepthWriteMask = desc.depthWrite || shadow ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
         pd.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER; // reversed-Z
         pd.DSVFormat = kDepthFormat;
     }

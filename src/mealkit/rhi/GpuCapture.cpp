@@ -18,16 +18,16 @@ namespace mealkit::rhi {
 namespace {
 
 RENDERDOC_API_1_6_0* g_renderdoc = nullptr;
-// PIX: WinPixGpuCapturer.dll의 PIXGpuCaptureNextFrames(파일, 프레임 수) (pix3.h와 같은 이름, WinPixEventRuntime 없이)
+// PIX: PIXGpuCaptureNextFrames(file, frame count) in WinPixGpuCapturer.dll (same name as pix3.h, without WinPixEventRuntime)
 using PixCaptureNextFrames = long(__stdcall*)(const wchar_t* fileName, unsigned int numFrames);
 PixCaptureNextFrames g_pixCapture = nullptr;
 std::string g_folder;
 unsigned g_pixCount = 0;
 
-// 설치 폴더의 DLL을 불러온다 (이미 들어와 있으면 같은 모듈)
+// Loads the DLL from the install folder (the same module if already loaded)
 void* loadFrom(const std::string& dir, const char* dll) {
     std::string error;
-    void* lib = loadLibrary(dll, error); // 도구가 이 프로세스를 띄웠으면 이미 있다
+    void* lib = loadLibrary(dll, error); // already present if the tool launched this process
     if (!lib && !dir.empty()) lib = loadLibrary(dir + "\\" + dll, error);
     return lib;
 }
@@ -38,12 +38,12 @@ bool loadRenderDoc() {
     const auto getApi = reinterpret_cast<pRENDERDOC_GetAPI>(findSymbol(lib, "RENDERDOC_GetAPI"));
     if (!getApi || !getApi(eRENDERDOC_API_Version_1_6_0, reinterpret_cast<void**>(&g_renderdoc)) || !g_renderdoc) return false;
     g_renderdoc->SetCaptureFilePathTemplate((g_folder + "/capture").c_str());
-    g_renderdoc->MaskOverlayBits(eRENDERDOC_Overlay_None, eRENDERDOC_Overlay_None); // 게임 화면에 글자를 덧그리지 않는다
+    g_renderdoc->MaskOverlayBits(eRENDERDOC_Overlay_None, eRENDERDOC_Overlay_None); // don't draw text over the game screen
     return true;
 }
 
 bool loadPix() {
-    // %ProgramFiles%\Microsoft PIX\<버전>\WinPixGpuCapturer.dll (가장 새 버전 폴더)
+    // %ProgramFiles%\Microsoft PIX\<version>\WinPixGpuCapturer.dll (newest version folder)
     const std::string root = environmentVariable("ProgramFiles") + "\\Microsoft PIX";
     std::string dir;
     for (const std::string& version : listDirectories(root)) dir = root + "\\" + version;
@@ -73,14 +73,14 @@ const char* gpuCaptureTool() {
 bool captureNextGpuFrame(bool openViewer) {
     if (g_renderdoc) {
         g_renderdoc->TriggerCapture();
-        // RenderDoc 창이 연결해 캡처를 받는다 (이미 연결돼 있으면 그 창이 받는다)
+        // The RenderDoc window connects and receives the capture (if already connected, that window receives it)
         if (openViewer && !g_renderdoc->IsTargetControlConnected()) g_renderdoc->LaunchReplayUI(1, nullptr);
         MEALKIT_INFO("GPU capture: next frame (RenderDoc)");
         return true;
     }
     if (g_pixCapture) {
         const std::string file = g_folder + "/capture" + std::to_string(++g_pixCount) + ".wpix";
-        std::wstring wide(file.begin(), file.end()); // 사용자 폴더 경로가 ASCII가 아니면 PIX가 거절할 수 있다
+        std::wstring wide(file.begin(), file.end()); // PIX may reject user folder paths that aren't ASCII
         const bool ok = g_pixCapture(wide.c_str(), 1) >= 0;
         MEALKIT_INFO("GPU capture: next frame (PIX) -> %s%s", file.c_str(), ok ? "" : " (failed)");
         return ok;
@@ -90,7 +90,7 @@ bool captureNextGpuFrame(bool openViewer) {
 
 std::string gpuCaptureFolder() { return g_folder; }
 
-#else // 출시 빌드: 캡처 도구를 불러오지 않는다
+#else // shipping builds: capture tools aren't loaded
 
 void loadGpuCaptureTool(bool) {}
 const char* gpuCaptureTool() { return nullptr; }

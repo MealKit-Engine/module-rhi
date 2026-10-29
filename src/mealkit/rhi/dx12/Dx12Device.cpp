@@ -12,7 +12,7 @@ namespace {
 
 ID3D12Device* g_errorDevice = nullptr;
 
-// DXGI 이름(UTF-16) → UTF-8 (BMP 밖 글자는 서로게이트 쌍)
+// DXGI name (UTF-16) → UTF-8 (characters outside the BMP are surrogate pairs)
 std::string narrow(const wchar_t* w) {
     std::string out;
     for (; *w; ++w) {
@@ -40,7 +40,7 @@ std::string narrow(const wchar_t* w) {
     return out;
 }
 
-// 사용자 모드 드라이버 버전. 장치 관리자·제조사 사이트가 보여 주는 네 자리 번호와 같다.
+// User-mode driver version. Same as the four-part number shown by Device Manager and vendor sites.
 std::string driverVersion(IDXGIAdapter1* adapter) {
     LARGE_INTEGER v{};
     if (FAILED(adapter->CheckInterfaceSupport(__uuidof(IDXGIDevice), &v))) return {};
@@ -50,7 +50,7 @@ std::string driverVersion(IDXGIAdapter1* adapter) {
     return buf;
 }
 
-// 고성능 우선 순서로 D3D12 장치를 만들 수 있는 첫 하드웨어 어댑터.
+// The first hardware adapter that can create a D3D12 device, in high-performance-first order.
 ComPtr<IDXGIAdapter1> findAdapter(IDXGIFactory6* factory) {
     for (UINT i = 0;; ++i) {
         ComPtr<IDXGIAdapter1> candidate;
@@ -83,7 +83,7 @@ void describeGpu(IDXGIAdapter1* adapter, ID3D12Device* device, GpuInfo& info) {
     device->CheckFeatureSupport(D3D12_FEATURE_FEATURE_LEVELS, &fl, sizeof(fl));
     info.featureLevel = static_cast<u32>(fl.MaxSupportedFeatureLevel);
 
-    // 런타임이 모르는 셰이더 모델을 물으면 실패하므로 높은 것부터 내려간다 (SDK 열거값이 없는 것은 숫자로).
+    // Asking for a shader model the runtime doesn't know fails, so go down from the highest (ones without SDK enum values as numbers).
     for (u32 model = 0x69; model >= 0x60; --model) {
         D3D12_FEATURE_DATA_SHADER_MODEL sm{static_cast<D3D_SHADER_MODEL>(model)};
         if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &sm, sizeof(sm)))) {
@@ -160,7 +160,7 @@ DXGI_FORMAT toDxgi(Format f) {
 
 void __stdcall onDebugMessage(D3D12_MESSAGE_CATEGORY, D3D12_MESSAGE_SEVERITY severity, D3D12_MESSAGE_ID id,
                               LPCSTR description, void*) {
-    // 오프스크린 대상은 지우는 색이 그때마다 달라(룩데브 조명 프리셋) 최적 지우기 값을 주지 않는다: 성능 안내일 뿐이다
+    // Offscreen targets are cleared with different colors each time (lookdev lighting presets), so no optimized clear value is given: it's only a performance hint
     if (id == D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE) return;
     if (severity <= D3D12_MESSAGE_SEVERITY_ERROR) MEALKIT_ERROR("[D3D12] %s", description);
     else if (severity == D3D12_MESSAGE_SEVERITY_WARNING) MEALKIT_WARN("[D3D12] %s", description);
@@ -226,16 +226,16 @@ void Device::Impl::releaseSwapchainResources() {
     for (auto& bb : backBuffers) bb.Reset();
 }
 
-// 모든 파이프라인이 같이 쓰는 루트 시그니처: 루트 상수(b0) + 버퍼 표(t0, space1) + 텍스처 표(t0, space2) + 샘플러(s0)
+// Root signature shared by all pipelines: root constants (b0) + buffer table (t0, space1) + texture table (t0, space2) + samplers (s0)
 void Device::Impl::createRootSignature() {
-    // 범위: 버퍼(space1), 2D 텍스처(space2), 큐브(space3). 텍스처와 큐브는 힙의 같은 칸들을 본다 (칸마다 한쪽 뷰만 있다)
+    // Ranges: buffers (space1), 2D textures (space2), cubes (space3). Textures and cubes look at the same heap slots (each slot has only one kind of view)
     D3D12_DESCRIPTOR_RANGE1 ranges[3] = {};
     for (u32 i = 0; i < 3; ++i) {
         ranges[i].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        ranges[i].NumDescriptors = UINT_MAX; // 무한 배열 (바인딩 티어 3)
+        ranges[i].NumDescriptors = UINT_MAX; // unbounded array (binding tier 3)
         ranges[i].BaseShaderRegister = 0;
         ranges[i].RegisterSpace = 1 + i;
-        ranges[i].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE; // 쓰지 않는 칸은 비어 있어도 된다
+        ranges[i].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE; // unused slots may be empty
     }
     D3D12_ROOT_PARAMETER1 params[4] = {};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
@@ -248,12 +248,12 @@ void Device::Impl::createRootSignature() {
         params[1 + i].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     }
     D3D12_STATIC_SAMPLER_DESC samplers[2] = {};
-    D3D12_STATIC_SAMPLER_DESC& sampler = samplers[0]; // s0: UI 아틀라스
+    D3D12_STATIC_SAMPLER_DESC& sampler = samplers[0]; // s0: UI atlases
     sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
     sampler.MaxLOD = D3D12_FLOAT32_MAX;
     sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    D3D12_STATIC_SAMPLER_DESC& wrap = samplers[1]; // s1: 모델 텍스처
+    D3D12_STATIC_SAMPLER_DESC& wrap = samplers[1]; // s1: model textures
     wrap = sampler;
     wrap.Filter = D3D12_FILTER_ANISOTROPIC;
     wrap.MaxAnisotropy = 8;
@@ -278,7 +278,7 @@ void Device::Impl::createRootSignature() {
 Device::~Device() { shutdown(); }
 
 bool Device::init(const DeviceDesc& desc) {
-    if (desc.gpuCapture) loadGpuCaptureTool(true); // 캡처 도구는 장치보다 먼저 들어와야 API를 가로챈다
+    if (desc.gpuCapture) loadGpuCaptureTool(true); // capture tools must be loaded before the device to intercept the API
     m = new Impl();
     m->hwnd = static_cast<HWND>(desc.window);
     m->width = desc.width;
@@ -362,7 +362,7 @@ bool Device::init(const DeviceDesc& desc) {
 
     D3D12_DESCRIPTOR_HEAP_DESC rtvDesc{};
     rtvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    rtvDesc.NumDescriptors = kBackBufferCount; // 오버레이 뷰
+    rtvDesc.NumDescriptors = kBackBufferCount; // overlay views
     HR(m->device->CreateDescriptorHeap(&rtvDesc, IID_PPV_ARGS(&m->rtvHeap)));
     m->rtvStride = m->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 
@@ -383,7 +383,7 @@ bool Device::init(const DeviceDesc& desc) {
     HR(m->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m->fence)));
     m->fenceEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
 
-    // 업로드 링: 프레임마다 kUploadBytesPerFrame. 셰이더는 g_buffers[0](원시 버퍼 뷰)으로 읽는다
+    // Upload ring: kUploadBytesPerFrame per frame. Shaders read it via g_buffers[0] (raw buffer view)
     const u64 ringBytes = kUploadBytesPerFrame * kFramesInFlight;
     const D3D12_HEAP_PROPERTIES uploadHeap = heapProperties(D3D12_HEAP_TYPE_UPLOAD);
     const D3D12_RESOURCE_DESC uploadDesc = bufferDesc(ringBytes);
@@ -399,7 +399,7 @@ bool Device::init(const DeviceDesc& desc) {
     rv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
     m->device->CreateShaderResourceView(m->uploadBuffer.Get(), &rv, m->srvCpu(0));
 
-    // GPU 시간: 타임스탬프 쿼리 힙 + readback 버퍼 (프레임마다 한 구간)
+    // GPU time: timestamp query heap + readback buffer (one section per frame)
     UINT64 frequency = 0;
     if (SUCCEEDED(m->queue->GetTimestampFrequency(&frequency)) && frequency > 0) {
         D3D12_QUERY_HEAP_DESC timestampDesc{};
@@ -488,7 +488,7 @@ Buffer Device::createBuffer(BufferUsage usage, const void* data, u64 bytes) {
     HR(m->device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)));
     ComPtr<ID3D12GraphicsCommandList> list;
     HR(m->device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr, IID_PPV_ARGS(&list)));
-    // 버퍼는 COMMON에서 COPY_DEST로, 실행 후 다시 읽기 상태로 암묵적으로 승격/감쇠된다.
+    // Buffers are implicitly promoted/decayed from COMMON to COPY_DEST and back to a read state after execution.
     list->CopyBufferRegion(entry.resource.Get(), 0, staging.Get(), 0, bytes);
     HR(list->Close());
     ID3D12CommandList* lists[] = {list.Get()};
@@ -539,7 +539,7 @@ Texture Device::createTexture(const TextureInit& init) {
     HR(m->device->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
                                           IID_PPV_ARGS(&entry.resource)));
 
-    // 하위 자원(면마다 밉 0부터)마다 GPU 줄 간격(256바이트 정렬)으로 업로드 버퍼에 옮겨 한 번에 복사한다
+    // Each subresource (per face from mip 0) is moved into the upload buffer at the GPU row pitch (256-byte aligned) and copied in one go
     const u32 subresources = init.mipLevels * layers;
     std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(subresources);
     std::vector<UINT> rows(subresources);
@@ -558,7 +558,7 @@ Texture Device::createTexture(const TextureInit& init) {
     for (u32 sub = 0; sub < subresources; ++sub) {
         const u32 mip = sub % init.mipLevels;
         const u32 w = std::max(1u, init.width >> mip), h = std::max(1u, init.height >> mip);
-        const u64 tight = textureMipBytes(init.format, w, h) / rows[sub]; // 한 줄 (BC는 블록 줄)
+        const u64 tight = textureMipBytes(init.format, w, h) / rows[sub]; // one row (block row for BC)
         for (UINT row = 0; row < rows[sub]; ++row)
             std::memcpy(mapped + footprints[sub].Offset + static_cast<u64>(row) * footprints[sub].Footprint.RowPitch,
                         src + row * tight, tight);
@@ -574,7 +574,7 @@ Texture Device::createTexture(const TextureInit& init) {
         D3D12_TEXTURE_COPY_LOCATION dst{};
         dst.pResource = entry.resource.Get();
         dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        dst.SubresourceIndex = sub; // 면 × 밉 수 + 밉
+        dst.SubresourceIndex = sub; // face × mip count + mip
         D3D12_TEXTURE_COPY_LOCATION from{};
         from.pResource = staging.Get();
         from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
@@ -619,7 +619,7 @@ RenderTarget Device::createRenderTarget(u32 width, u32 height, TargetKind kind) 
     td.Format = color.format;
     td.SampleDesc.Count = 1;
     td.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
-    // 지우는 색이 쓰는 쪽(조명 프리셋 배경)마다 달라 최적 지우기 값은 주지 않는다
+    // The clear color differs per user (lighting preset backgrounds), so no optimized clear value is given
     const D3D12_HEAP_PROPERTIES defaultHeap = heapProperties(D3D12_HEAP_TYPE_DEFAULT);
     HR(m->device->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &td, toD3d(TextureState::ShaderRead), nullptr,
                                           IID_PPV_ARGS(&color.resource)));
@@ -676,14 +676,14 @@ void Device::destroyRenderTarget(RenderTarget target) {
 
 RenderTarget Device::createDepthTarget(u32 width, u32 height) {
     Impl::TextureEntry depth;
-    depth.format = DXGI_FORMAT_R32_FLOAT; // 읽기 뷰
+    depth.format = DXGI_FORMAT_R32_FLOAT; // read view
     D3D12_RESOURCE_DESC td{};
     td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     td.Width = width;
     td.Height = height;
     td.DepthOrArraySize = 1;
     td.MipLevels = 1;
-    td.Format = DXGI_FORMAT_R32_TYPELESS; // 쓰기는 D32 뷰, 읽기는 R32 뷰
+    td.Format = DXGI_FORMAT_R32_TYPELESS; // writes use a D32 view, reads an R32 view
     td.SampleDesc.Count = 1;
     td.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
     const D3D12_HEAP_PROPERTIES defaultHeap = heapProperties(D3D12_HEAP_TYPE_DEFAULT);
@@ -773,7 +773,7 @@ Pipeline Device::createPipeline(const PipelineDesc& desc) {
 bool Device::recreatePipeline(Pipeline pipeline, const PipelineDesc& desc) {
     if (!m || m->inFrame || !pipeline || pipeline.id > m->pipelines.size()) return false;
     m->waitIdle();
-    createPipeline(desc); // 끝에 붙은 새 것을 원래 자리로
+    createPipeline(desc); // the new one appended at the end goes into the original slot
     m->pipelines[pipeline.id - 1] = std::move(m->pipelines.back());
     m->pipelines.pop_back();
     return true;
@@ -782,7 +782,7 @@ bool Device::recreatePipeline(Pipeline pipeline, const PipelineDesc& desc) {
 bool Device::beginFrame() {
     if (!m || m->width == 0 || m->height == 0) return false;
 
-    // 프레젠트 큐가 비기를 기다린다: CPU가 GPU보다 너무 앞서가 입력 지연이 쌓이는 것을 막는다.
+    // Waits for the present queue to drain: keeps the CPU from running too far ahead of the GPU and piling up input latency.
     WaitForSingleObjectEx(m->frameLatencyWaitable, 1000, TRUE);
 
     Impl::Frame& frame = m->frames[m->frameIndex];
@@ -868,10 +868,10 @@ void Device::endFrame(bool vsync, Capture* capture) {
     }
 
 #if defined(TRACY_ENABLE)
-    m->tracyFrameZone.reset(); // GPU 구간 끝 (커맨드 리스트를 닫기 전에)
+    m->tracyFrameZone.reset(); // end of the GPU zone (before closing the command list)
 #endif
     Impl::Frame& frame = m->frames[m->frameIndex];
-    if (m->queryHeap) { // 쓴 쿼리만 readback으로 (쓰지 않은 칸을 읽으면 검증 레이어 오류)
+    if (m->queryHeap) { // only written queries go to readback (reading unwritten slots is a validation layer error)
         const u32 base = m->queryBase();
         list->EndQuery(m->queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, base + 1);
         m->resolveQueries(base, 2);
@@ -969,7 +969,7 @@ void CommandList::beginTarget(RenderTarget target, const f32 clearColor[4], f32 
     Device::Impl* m = m_device->impl();
     ID3D12GraphicsCommandList* list = m->list.Get();
     const Device::Impl::TargetEntry& t = m->targets[target.id - 1];
-    if (t.depthOnly) { // 그림자 맵: 깊이만 묶고 지운다
+    if (t.depthOnly) { // shadow maps: bind and clear depth only
         const D3D12_RESOURCE_BARRIER toDepth =
             transition(t.depth.Get(), toD3d(TextureState::ShaderRead), D3D12_RESOURCE_STATE_DEPTH_WRITE);
         list->ResourceBarrier(1, &toDepth);
@@ -1014,13 +1014,13 @@ void CommandList::setPipeline(Pipeline pipeline) {
     Device::Impl* m = m_device->impl();
     ID3D12GraphicsCommandList* list = m->list.Get();
     list->SetPipelineState(m->pipelines[pipeline.id - 1].Get());
-    // 디버그 UI가 자기 루트 시그니처·힙을 묶었을 수 있으므로 매번 다시 묶는다 (루트 상수는 이 뒤에)
+    // The debug UI may have bound its own root signature/heap, so rebind every time (root constants after this)
     ID3D12DescriptorHeap* heaps[] = {m->srvHeap.Get()};
     list->SetDescriptorHeaps(1, heaps);
     list->SetGraphicsRootSignature(m->rootSignature.Get());
     list->SetGraphicsRootDescriptorTable(1, m->srvGpu(0));
     list->SetGraphicsRootDescriptorTable(2, m->srvGpu(kMaxBuffers));
-    list->SetGraphicsRootDescriptorTable(3, m->srvGpu(kMaxBuffers)); // 큐브 (같은 칸들)
+    list->SetGraphicsRootDescriptorTable(3, m->srvGpu(kMaxBuffers)); // cubes (same slots)
     list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 }
 
@@ -1069,11 +1069,11 @@ void CommandList::copyToTexture(Texture texture, u32 x, u32 y, u32 width, u32 he
     m->list->CopyTextureRegion(&dst, x, y, 0, &src, nullptr);
 }
 
-// ---------------------------------------------------------------- GPU 조사
+// ---------------------------------------------------------------- GPU inspection
 
 std::string gpuMinimumError(const GpuInfo& info) {
-    // 최소 사양 Intel 11세대(Xe-LP): SM 6.6과 바인딩 티어 3(bindless 무한 배열)을 쓴다.
-    // 같은 GPU라도 제조사가 깐 오래된 드라이버면 6.6이 안 나오므로 드라이버 버전을 같이 알려 준다.
+    // Min-spec Intel 11th gen (Xe-LP): uses SM 6.6 and binding tier 3 (bindless unbounded arrays).
+    // Even the same GPU won't report 6.6 with an old vendor-installed driver, so the driver version is reported too.
     const char* driver = info.driverVersion.empty() ? "unknown" : info.driverVersion.c_str();
     char buf[512];
     if (info.shaderModel < 0x66) {

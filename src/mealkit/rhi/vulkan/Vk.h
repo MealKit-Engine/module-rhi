@@ -1,7 +1,7 @@
 #pragma once
 
-// Vulkan 백엔드 내부 (rhi/vulkan/ 파일만 include한다). Vulkan 1.3 + descriptor indexing + dynamic rendering + synchronization2.
-// SDK 없이 빌드한다: 헤더는 third_party/vulkan-headers, 로더(vulkan-1.dll)는 volk가 실행 중에 불러온다, 메모리는 VMA.
+// Vulkan backend internals (only rhi/vulkan/ files include this). Vulkan 1.3 + descriptor indexing + dynamic rendering + synchronization2.
+// Built without the SDK: headers in third_party/vulkan-headers, the loader (vulkan-1.dll) loaded at runtime by volk, memory via VMA.
 #include "mealkit/rhi/Rhi.h"
 
 #include <volk.h>
@@ -9,12 +9,12 @@
 
 namespace mealkit::rhi {
 
-constexpr u32 kMaxBuffers = 16;    // g_buffers[] (바인딩 0)
-constexpr u32 kMaxTextures = 4096; // g_textures[] (바인딩 1)
+constexpr u32 kMaxBuffers = 16;    // g_buffers[] (binding 0)
+constexpr u32 kMaxTextures = 4096; // g_textures[] (binding 1)
 constexpr u64 kUploadBytesPerFrame = 8ull << 20;
 constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT;
-constexpr VkFormat kHdrFormat = VK_FORMAT_B10G11R11_UFLOAT_PACK32; // 장면·블룸 대상 (Target::Scene/Hdr, 선형)
-constexpr u32 kQueriesPerFrame = 2 + 2 * kMaxGpuTimers; // 프레임 처음·끝 + 구간마다 처음·끝
+constexpr VkFormat kHdrFormat = VK_FORMAT_B10G11R11_UFLOAT_PACK32; // scene/bloom targets (Target::Scene/Hdr, linear)
+constexpr u32 kQueriesPerFrame = 2 + 2 * kMaxGpuTimers; // frame start/end + start/end per section
 
 void checkVk(VkResult result, const char* expr, const char* file, int line);
 #define MEALKIT_VK(expr) ::mealkit::rhi::checkVk((expr), #expr, __FILE__, __LINE__)
@@ -32,14 +32,14 @@ struct Device::Impl {
     VmaAllocator allocator = VK_NULL_HANDLE;
     u32 apiVersion = 0;
 
-    // 스왑체인: UNORM 뷰 하나 (Target::Overlay, 셰이더가 sRGB 값을 쓴다). 깊이는 장면 대상에 있다
+    // Swap chain: one UNORM view (Target::Overlay, shaders write sRGB values). Depth is in the scene target
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
-    VkFormat swapchainFormat = VK_FORMAT_UNDEFINED; // UNORM (Ldr 대상도 이 형식)
+    VkFormat swapchainFormat = VK_FORMAT_UNDEFINED; // UNORM (Ldr targets use this format too)
     bool swapchainBgra = false;
     struct SwapImage {
         VkImage image = VK_NULL_HANDLE;
         VkImageView overlayView = VK_NULL_HANDLE;
-        VkSemaphore renderFinished = VK_NULL_HANDLE; // 프레젠트가 기다린다 (이미지마다)
+        VkSemaphore renderFinished = VK_NULL_HANDLE; // present waits on it (per image)
     };
     std::vector<SwapImage> swapImages;
     bool swapchainVsync = true;
@@ -47,13 +47,13 @@ struct Device::Impl {
     bool immediateSupported = false;
     bool mailboxSupported = false;
 
-    // bindless: 세트 하나 (버퍼 배열, 텍스처 배열, 고정 샘플러), 모든 파이프라인이 같은 레이아웃
+    // bindless: one set (buffer array, texture array, static samplers), the same layout for all pipelines
     VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
     VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     VkSampler linearClamp = VK_NULL_HANDLE;
-    VkSampler linearWrap = VK_NULL_HANDLE; // 모델 텍스처 (반복, 이방성)
+    VkSampler linearWrap = VK_NULL_HANDLE; // model textures (repeat, anisotropy)
     std::vector<u32> freeTextureSlots;
 
     struct Frame {
@@ -61,13 +61,13 @@ struct Device::Impl {
         VkCommandBuffer cmd = VK_NULL_HANDLE;
         VkFence fence = VK_NULL_HANDLE;
         VkSemaphore imageAcquired = VK_NULL_HANDLE;
-        bool timed = false; // 타임스탬프를 쓰고 제출했다 (fence 뒤에 읽는다)
-        u32 timerMask = 0;  // 이 프레임에 쓴 구간
+        bool timed = false; // timestamps were written and submitted (read after the fence)
+        u32 timerMask = 0;  // sections used this frame
     } frames[Device::kFramesInFlight];
     CommandList cmd;
-    VkCommandPool immediatePool = VK_NULL_HANDLE; // 불러올 때 복사 (GPU를 기다린다)
+    VkCommandPool immediatePool = VK_NULL_HANDLE; // copies at load time (waits for the GPU)
 
-    VkBuffer uploadBuffer = VK_NULL_HANDLE; // 프레임마다 한 구간, 계속 매핑
+    VkBuffer uploadBuffer = VK_NULL_HANDLE; // one section per frame, persistently mapped
     VmaAllocation uploadAllocation = VK_NULL_HANDLE;
     u8* uploadCpu = nullptr;
     u64 uploadOffset = 0;
@@ -86,34 +86,34 @@ struct Device::Impl {
         u32 slot = 0;
     };
     std::vector<TextureEntry> textures;
-    // 오프스크린 대상: 색 이미지(textures의 한 칸, 읽기·그리기 같은 뷰), 깊이는 TargetKind::Scene만 (대상마다)
+    // Offscreen targets: color image (a slot in textures, same view for read and draw), depth only for TargetKind::Scene (per target)
     struct TargetEntry {
-        u32 texture = 0; // textures 번호 (Texture::id)
+        u32 texture = 0; // textures index (Texture::id)
         VkImage depthImage = VK_NULL_HANDLE;
         VmaAllocation depthAllocation = VK_NULL_HANDLE;
         VkImageView depthView = VK_NULL_HANDLE;
         u32 width = 0, height = 0;
-        bool depthOnly = false; // createDepthTarget: 깊이 이미지가 곧 textures[texture - 1]
+        bool depthOnly = false; // createDepthTarget: the depth image is textures[texture - 1] itself
     };
     std::vector<TargetEntry> targets;
-    std::vector<std::pair<u32, u64>> imguiTextures; // Texture::id → 디버그 UI 서술자 세트 (imguiTextureId)
+    std::vector<std::pair<u32, u64>> imguiTextures; // Texture::id → debug UI descriptor set (imguiTextureId)
     std::vector<VkPipeline> pipelines;
 
-    // GPU 시간: 프레임마다 kQueriesPerFrame칸
+    // GPU time: kQueriesPerFrame slots per frame
     VkQueryPool queryPool = VK_NULL_HANDLE;
     f64 timestampMsPerTick = 0.0;
     u64 timestampMask = ~0ull; // timestampValidBits
     GpuTimes gpuTimes;
     bool memoryBudget = false;
     bool fillModeNonSolid = false;
-    bool samplerAnisotropy = false; // 와이어프레임 파이프라인 (없으면 면으로) // VK_EXT_memory_budget (없으면 VMA가 자기 할당으로 어림한다)
+    bool samplerAnisotropy = false; // wireframe pipelines (filled faces if absent) // VK_EXT_memory_budget (if absent, VMA estimates from its own allocations)
 
     u32 width = 0, height = 0;
     u32 frameIndex = 0;
     u32 imageIndex = 0;
     bool inFrame = false;
     enum class Bound : u8 { None, Overlay, Target } bound = Bound::None;
-    bool imageIsTarget = false; // 이번 프레임에 백버퍼를 그리기 대상 배치로 바꿨다
+    bool imageIsTarget = false; // the back buffer was transitioned to the render target layout this frame
     GpuInfo gpu;
     std::string initError;
 

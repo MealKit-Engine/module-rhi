@@ -53,7 +53,7 @@ bool hasExtension(VkPhysicalDevice physical, const char* name) {
     return false;
 }
 
-// 그래픽 큐 (surface가 있으면 프레젠트도 되는 것). 없으면 UINT32_MAX
+// Graphics queue (one that can also present if there's a surface). UINT32_MAX if none
 u32 findQueueFamily(VkPhysicalDevice physical, VkSurfaceKHR surface) {
     u32 count = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, nullptr);
@@ -68,7 +68,7 @@ u32 findQueueFamily(VkPhysicalDevice physical, VkSurfaceKHR surface) {
     return UINT32_MAX;
 }
 
-// 최소 사양 (Vulkan 1.3 + 엔진이 쓰는 기능). 모자란 것을 문장으로, 맞으면 빈 문자열
+// Min spec (Vulkan 1.3 + features the engine uses). What's missing as a sentence, empty string if it meets it
 std::string missingFeatures(VkPhysicalDevice physical, VkSurfaceKHR surface) {
     VkPhysicalDeviceProperties props{};
     vkGetPhysicalDeviceProperties(physical, &props);
@@ -126,7 +126,7 @@ void describeGpu(VkPhysicalDevice physical, GpuInfo& info) {
     info.waveLaneCountMin = info.waveLaneCountMax = subgroup.subgroupSize;
 }
 
-// 최소 사양을 넘는 장치 중 외장 > 내장 > 그 밖 순서. 맞는 것이 없으면 첫 장치와 모자란 것
+// Among devices meeting the min spec, discrete > integrated > others. If none fit, the first device and what's missing
 VkPhysicalDevice pickDevice(VkInstance instance, VkSurfaceKHR surface, std::string* missing) {
     u32 count = 0;
     vkEnumeratePhysicalDevices(instance, &count, nullptr);
@@ -203,7 +203,7 @@ VkInstance createInstance(bool withSurface, bool validation, bool* debugUtils) {
     return instance;
 }
 
-// 이미지 배치 바꾸기 (synchronization2). 프레임에 몇 번뿐이라 단계는 넓게 잡는다
+// Image layout transition (synchronization2). Only a few per frame, so stages are kept broad
 void imageBarrier(VkCommandBuffer cmd, VkImage image, VkImageAspectFlags aspect, VkImageLayout from, VkImageLayout to,
                   u32 mipLevels = 1, u32 layers = 1) {
     VkImageMemoryBarrier2 b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
@@ -262,7 +262,7 @@ bool Device::Impl::createSwapchain() {
     if (extent.width == UINT32_MAX) extent = {width, height};
     extent.width = std::clamp(extent.width, caps.minImageExtent.width, caps.maxImageExtent.width);
     extent.height = std::clamp(extent.height, caps.minImageExtent.height, caps.maxImageExtent.height);
-    if (extent.width == 0 || extent.height == 0) return false; // 최소화
+    if (extent.width == 0 || extent.height == 0) return false; // minimized
 
     u32 imageCount = std::max(caps.minImageCount, 3u);
     if (caps.maxImageCount) imageCount = std::min(imageCount, caps.maxImageCount);
@@ -278,7 +278,7 @@ bool Device::Impl::createSwapchain() {
     ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ci.preTransform = caps.currentTransform;
     ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-    // 수직동기 끔: 티어링 허용(IMMEDIATE), 없으면 MAILBOX. DX12의 ALLOW_TEARING과 같다
+    // Vsync off: allow tearing (IMMEDIATE), otherwise MAILBOX. Same as DX12's ALLOW_TEARING
     ci.presentMode = swapchainVsync         ? VK_PRESENT_MODE_FIFO_KHR
                      : immediateSupported   ? VK_PRESENT_MODE_IMMEDIATE_KHR
                      : mailboxSupported     ? VK_PRESENT_MODE_MAILBOX_KHR
@@ -287,7 +287,7 @@ bool Device::Impl::createSwapchain() {
     ci.oldSwapchain = swapchain;
     VkSwapchainKHR created = VK_NULL_HANDLE;
     VK(vkCreateSwapchainKHR(device, &ci, nullptr, &created));
-    destroySwapchain(); // 이전 것 (GPU는 이미 기다렸다)
+    destroySwapchain(); // the previous one (the GPU was already waited on)
     swapchain = created;
     width = extent.width;
     height = extent.height;
@@ -381,7 +381,7 @@ u32 Device::Impl::allocTextureSlot() {
 Device::~Device() { shutdown(); }
 
 bool Device::init(const DeviceDesc& desc) {
-    if (desc.gpuCapture) loadGpuCaptureTool(false); // 캡처 도구는 장치보다 먼저 들어와야 API를 가로챈다
+    if (desc.gpuCapture) loadGpuCaptureTool(false); // capture tools must be loaded before the device to intercept the API
     m = new Impl();
     m->hwnd = desc.window;
     m->width = desc.width;
@@ -427,7 +427,7 @@ bool Device::init(const DeviceDesc& desc) {
     m->apiVersion = VK_API_VERSION_1_3;
     m->queueFamily = findQueueFamily(m->physical, m->surface);
 
-    // 장치: 큐 하나 + 엔진이 쓰는 기능만 켠다
+    // Device: one queue + only the features the engine uses
     const f32 priority = 1.0f;
     VkDeviceQueueCreateInfo qi{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
     qi.queueFamilyIndex = m->queueFamily;
@@ -443,17 +443,17 @@ bool Device::init(const DeviceDesc& desc) {
     f12.descriptorBindingPartiallyBound = VK_TRUE;
     f12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
     f12.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
-    f12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE; // 머티리얼 텍스처 (NonUniformResourceIndex)
+    f12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE; // material textures (NonUniformResourceIndex)
     VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &f12};
     VkPhysicalDeviceFeatures supported{};
     vkGetPhysicalDeviceFeatures(m->physical, &supported);
-    m->fillModeNonSolid = supported.fillModeNonSolid == VK_TRUE; // 선택 (에디터 와이어프레임 보기)
+    m->fillModeNonSolid = supported.fillModeNonSolid == VK_TRUE; // optional (editor wireframe view)
     features.features.fillModeNonSolid = supported.fillModeNonSolid;
-    m->samplerAnisotropy = supported.samplerAnisotropy == VK_TRUE; // 모델 텍스처 샘플러 (없으면 이방성 없이)
+    m->samplerAnisotropy = supported.samplerAnisotropy == VK_TRUE; // model texture sampler (no anisotropy if absent)
     features.features.samplerAnisotropy = supported.samplerAnisotropy;
-    features.features.textureCompressionBC = supported.textureCompressionBC; // BC7·BC5 (데스크톱 GPU는 모두 있다)
+    features.features.textureCompressionBC = supported.textureCompressionBC; // BC7/BC5 (all desktop GPUs have it)
     std::vector<const char*> extensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
-    m->memoryBudget = hasExtension(m->physical, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME); // 선택 (GPU 메모리 숫자)
+    m->memoryBudget = hasExtension(m->physical, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME); // optional (GPU memory numbers)
     if (m->memoryBudget) extensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
     VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &features};
     dci.queueCreateInfoCount = 1;
@@ -476,7 +476,7 @@ bool Device::init(const DeviceDesc& desc) {
     if (m->memoryBudget) vi.flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
     VK(vmaCreateAllocator(&vi, &m->allocator));
 
-    // 스왑체인 형식: UNORM (포스트·UI가 sRGB 값을 쓴다). Windows 드라이버는 BGRA가 흔하다
+    // Swap chain format: UNORM (post/UI write sRGB values). BGRA is common on Windows drivers
     u32 formatCount = 0;
     vkGetPhysicalDeviceSurfaceFormatsKHR(m->physical, m->surface, &formatCount, nullptr);
     std::vector<VkSurfaceFormatKHR> surfaceFormats(formatCount);
@@ -500,14 +500,14 @@ bool Device::init(const DeviceDesc& desc) {
     }
     if (!m->createSwapchain()) return fail("Swapchain creation failed (window has no size)");
 
-    // bindless 세트: 0 = 버퍼 배열, 1 = 텍스처 배열, 2 = 고정 샘플러 (shaders/Bindless.hlsli)
+    // bindless set: 0 = buffer array, 1 = texture array, 2 = static samplers (shaders/Bindless.hlsli)
     VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     sci.magFilter = sci.minFilter = VK_FILTER_LINEAR;
     sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
     sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     sci.maxLod = VK_LOD_CLAMP_NONE;
     VK(vkCreateSampler(m->device, &sci, nullptr, &m->linearClamp));
-    sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT; // 3: 모델 텍스처
+    sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT; // 3: model textures
     sci.anisotropyEnable = m->samplerAnisotropy ? VK_TRUE : VK_FALSE;
     sci.maxAnisotropy = 8.0f;
     VK(vkCreateSampler(m->device, &sci, nullptr, &m->linearWrap));
@@ -516,7 +516,7 @@ bool Device::init(const DeviceDesc& desc) {
     bindings[1] = {1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMaxTextures, VK_SHADER_STAGE_ALL_GRAPHICS, nullptr};
     bindings[2] = {2, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_ALL_GRAPHICS, &m->linearClamp};
     bindings[3] = {3, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_ALL_GRAPHICS, &m->linearWrap};
-    bindings[4] = {4, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMaxTextures, VK_SHADER_STAGE_ALL_GRAPHICS, nullptr}; // 큐브 (텍스처와 같은 번호)
+    bindings[4] = {4, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMaxTextures, VK_SHADER_STAGE_ALL_GRAPHICS, nullptr}; // cubes (same indices as textures)
     const VkDescriptorBindingFlags bindless =
         VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
     const VkDescriptorBindingFlags bindingFlags[5] = {bindless, bindless, 0, 0, bindless};
@@ -551,7 +551,7 @@ bool Device::init(const DeviceDesc& desc) {
     pli.pPushConstantRanges = &push;
     VK(vkCreatePipelineLayout(m->device, &pli, nullptr, &m->pipelineLayout));
 
-    // 업로드 링: CPU가 쓰고 GPU가 읽는 메모리 하나 (UMA에서는 GPU 메모리 그대로), g_buffers[0]
+    // Upload ring: one memory block the CPU writes and the GPU reads (GPU memory itself on UMA), g_buffers[0]
     const u64 ringBytes = kUploadBytesPerFrame * kFramesInFlight;
     VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bci.size = ringBytes;
@@ -592,7 +592,7 @@ bool Device::init(const DeviceDesc& desc) {
     ipi.queueFamilyIndex = m->queueFamily;
     VK(vkCreateCommandPool(m->device, &ipi, nullptr, &m->immediatePool));
 
-    // GPU 시간: 그래픽 큐가 타임스탬프를 지원하면 쿼리 풀 하나 (프레임마다 한 구간)
+    // GPU time: one query pool if the graphics queue supports timestamps (one section per frame)
     u32 familyCount = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(m->physical, &familyCount, nullptr);
     std::vector<VkQueueFamilyProperties> families(familyCount);
@@ -637,7 +637,7 @@ void Device::shutdown() {
     if (m->device) {
         vkDeviceWaitIdle(m->device);
         for (VkPipeline p : m->pipelines) vkDestroyPipeline(m->device, p, nullptr);
-        for (Impl::TargetEntry& t : m->targets) { // 색 이미지는 textures가 지운다 (깊이만 대상은 깊이도)
+        for (Impl::TargetEntry& t : m->targets) { // color images are deleted by textures (and depth too for depth-only targets)
             if (t.depthOnly || !t.depthImage) continue;
             vkDestroyImageView(m->device, t.depthView, nullptr);
             vmaDestroyImage(m->allocator, t.depthImage, t.depthAllocation);
@@ -732,7 +732,7 @@ Texture Device::createTexture(u32 width, u32 height, Format format) {
     VK(vmaCreateImage(m->allocator, &ici, &aci, &entry.image, &entry.allocation, nullptr));
     entry.view = createView(m->device, entry.image, ici.format, VK_IMAGE_ASPECT_COLOR_BIT);
 
-    // DX12처럼 내용 0, 셰이더가 읽는 배치로 시작한다
+    // Like DX12, starts with zero contents in the shader-readable layout
     VkCommandBuffer cmd = m->beginImmediate();
     imageBarrier(cmd, entry.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     const VkClearColorValue zero{};
@@ -757,7 +757,7 @@ Texture Device::createTexture(u32 width, u32 height, Format format) {
 }
 
 RenderTarget Device::createRenderTarget(u32 width, u32 height, TargetKind kind) {
-    // 색: Ldr은 스왑체인과 같은 UNORM 형식 (Target::Overlay 파이프라인을 그대로 쓴다), 나머지는 HDR
+    // Color: Ldr uses the same UNORM format as the swap chain (Target::Overlay pipelines are used as is), the rest HDR
     VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     ici.imageType = VK_IMAGE_TYPE_2D;
     ici.format = kind == TargetKind::Ldr ? m->swapchainFormat : kHdrFormat;
@@ -766,7 +766,7 @@ RenderTarget Device::createRenderTarget(u32 width, u32 height, TargetKind kind) 
     ici.arrayLayers = 1;
     ici.samples = VK_SAMPLE_COUNT_1_BIT;
     ici.tiling = VK_IMAGE_TILING_OPTIMAL;
-    ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT; // 읽기 (Capture::source)
+    ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT; // readback (Capture::source)
     VmaAllocationCreateInfo aci{};
     aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
     Impl::TextureEntry color;
@@ -790,7 +790,7 @@ RenderTarget Device::createRenderTarget(u32 width, u32 height, TargetKind kind) 
         target.depthView = createView(m->device, target.depthImage, kDepthFormat, VK_IMAGE_ASPECT_DEPTH_BIT);
     }
 
-    // DX12처럼 셰이더가 읽는 배치로 시작한다
+    // Like DX12, starts in the shader-readable layout
     VkCommandBuffer cmd = m->beginImmediate();
     imageBarrier(cmd, color.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     m->endImmediate(cmd);
@@ -842,7 +842,7 @@ RenderTarget Device::createDepthTarget(u32 width, u32 height) {
     VK(vmaCreateImage(m->allocator, &ici, &aci, &depth.image, &depth.allocation, nullptr));
     depth.view = createView(m->device, depth.image, kDepthFormat, VK_IMAGE_ASPECT_DEPTH_BIT);
 
-    VkCommandBuffer cmd = m->beginImmediate(); // DX12처럼 셰이더가 읽는 배치로 시작한다
+    VkCommandBuffer cmd = m->beginImmediate(); // like DX12, starts in the shader-readable layout
     imageBarrier(cmd, depth.image, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     m->endImmediate(cmd);
 
@@ -861,7 +861,7 @@ RenderTarget Device::createDepthTarget(u32 width, u32 height) {
     target.depthOnly = true;
     target.width = width;
     target.height = height;
-    target.depthImage = depth.image; // 이미지·뷰는 textures 쪽이 갖는다 (지우지 않는다)
+    target.depthImage = depth.image; // the image/view are owned by textures (not deleted here)
     target.depthView = depth.view;
     m->textures.push_back(depth);
     target.texture = static_cast<u32>(m->textures.size());
@@ -898,7 +898,7 @@ Texture Device::createTexture(const TextureInit& init) {
         entry.view = createView(m->device, entry.image, ici.format, VK_IMAGE_ASPECT_COLOR_BIT, init.mipLevels);
     }
 
-    // 면마다 밉을 빈틈 없이 차례로 담은 스테이징 버퍼 하나 → 하위 자원마다 복사 (오프셋은 블록·텍셀 크기의 배수)
+    // One staging buffer with each face's mips packed contiguously → copied per subresource (offsets are multiples of block/texel size)
     u64 total = 0;
     std::vector<VkBufferImageCopy> regions(init.mipLevels * layers);
     for (u32 layer = 0; layer < layers; ++layer)
@@ -990,7 +990,7 @@ Pipeline Device::createPipeline(const PipelineDesc& desc) {
     VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
     raster.polygonMode = desc.wireframe && m->fillModeNonSolid ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
     raster.cullMode = desc.cullFront ? VK_CULL_MODE_FRONT_BIT : desc.cullBack ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE;
-    raster.frontFace = VK_FRONT_FACE_CLOCKWISE; // 뷰포트를 뒤집어(setViewport) 화면 좌표가 DX12와 같다
+    raster.frontFace = VK_FRONT_FACE_CLOCKWISE; // the viewport is flipped (setViewport) so screen coordinates match DX12
     raster.lineWidth = 1.0f;
     VkPipelineMultisampleStateCreateInfo multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
     multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
@@ -1050,7 +1050,7 @@ Pipeline Device::createPipeline(const PipelineDesc& desc) {
 bool Device::recreatePipeline(Pipeline pipeline, const PipelineDesc& desc) {
     if (!m || m->inFrame || !pipeline || pipeline.id > m->pipelines.size()) return false;
     vkDeviceWaitIdle(m->device);
-    createPipeline(desc); // 끝에 붙은 새 것을 원래 자리로
+    createPipeline(desc); // the new one appended at the end goes into the original slot
     vkDestroyPipeline(m->device, m->pipelines[pipeline.id - 1], nullptr);
     m->pipelines[pipeline.id - 1] = m->pipelines.back();
     m->pipelines.pop_back();
@@ -1176,7 +1176,7 @@ void Device::endFrame(bool vsync, Capture* capture) {
     const VkResult presented = vkQueuePresentKHR(m->queue, &present);
     if (presented == VK_ERROR_OUT_OF_DATE_KHR || presented == VK_SUBOPTIMAL_KHR) m->swapchainDirty = true;
     else VK(presented);
-    if (vsync != m->swapchainVsync) { // 프레젠트 방식은 스왑체인을 다시 만들어야 바뀐다
+    if (vsync != m->swapchainVsync) { // the present mode only changes by recreating the swap chain
         m->swapchainVsync = vsync;
         m->swapchainDirty = true;
     }
@@ -1215,7 +1215,7 @@ GpuMemory Device::gpuMemory() const {
     vmaGetHeapBudgets(m->allocator, budgets);
     const VkPhysicalDeviceMemoryProperties* props = nullptr;
     vmaGetMemoryProperties(m->allocator, &props);
-    GpuMemory out; // DX12의 LOCAL 세그먼트처럼 장치 로컬 힙만 (UMA는 시스템 메모리 힙이 장치 로컬)
+    GpuMemory out; // only device-local heaps like DX12's LOCAL segment (on UMA the system memory heap is device local)
     for (u32 i = 0; i < props->memoryHeapCount; ++i) {
         if (!(props->memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)) continue;
         out.used += budgets[i].usage;
@@ -1233,7 +1233,7 @@ void CommandList::beginTarget(RenderTarget target, const f32 clearColor[4], f32 
     m->endRendering();
     VkCommandBuffer list = m->current();
     const Device::Impl::TargetEntry& t = m->targets[target.id - 1];
-    if (t.depthOnly) { // 그림자 맵: 깊이만 묶고 지운다 (깊이는 다음에 셰이더가 읽으므로 저장한다)
+    if (t.depthOnly) { // shadow maps: bind and clear depth only (depth is stored since shaders read it next)
         imageBarrier(list, t.depthImage, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                      VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
         VkRenderingAttachmentInfo depth{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
@@ -1256,7 +1256,7 @@ void CommandList::beginTarget(RenderTarget target, const f32 clearColor[4], f32 
     VkRenderingAttachmentInfo color{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     color.imageView = image.view;
     color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    color.loadOp = clearColor ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD; // 지우지 않으면 내용을 그대로 둔다
+    color.loadOp = clearColor ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD; // if not cleared, contents are kept
     color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     if (clearColor) std::memcpy(color.clearValue.color.float32, clearColor, sizeof(f32) * 4);
     VkRenderingAttachmentInfo depth{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
@@ -1305,7 +1305,7 @@ void CommandList::endTimer(u32 timer) {
 
 void CommandList::setViewport(f32 x, f32 y, f32 width, f32 height) {
     VkCommandBuffer cmd = m_device->impl()->current();
-    // 높이를 음수로 뒤집어 클립 공간 y가 DX12처럼 위를 향하게 한다 (Vulkan 1.1 기본)
+    // Flip the height negative so clip-space y points up like DX12 (Vulkan 1.1 core)
     const VkViewport viewport{x, y + height, width, -height, 0.0f, 1.0f};
     const VkRect2D scissor{{static_cast<i32>(x), static_cast<i32>(y)}, {static_cast<u32>(width), static_cast<u32>(height)}};
     vkCmdSetViewport(cmd, 0, 1, &viewport);
@@ -1316,7 +1316,7 @@ void CommandList::setPipeline(Pipeline pipeline) {
     Device::Impl* m = m_device->impl();
     VkCommandBuffer cmd = m->current();
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m->pipelines[pipeline.id - 1]);
-    // 디버그 UI가 자기 세트를 묶었을 수 있으므로 매번 다시 묶는다
+    // The debug UI may have bound its own set, so rebind every time
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m->pipelineLayout, 0, 1, &m->descriptorSet, 0, nullptr);
 }
 
@@ -1348,7 +1348,7 @@ void CommandList::draw(u32 vertexCount, u32 instanceCount) {
 
 void CommandList::textureBarrier(Texture texture, TextureState before, TextureState after) {
     Device::Impl* m = m_device->impl();
-    m->endRendering(); // 배리어·복사는 그리기 대상 밖에서
+    m->endRendering(); // barriers/copies happen outside the render target
     auto layout = [](TextureState s) {
         return s == TextureState::CopyDst ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     };
@@ -1369,7 +1369,7 @@ void CommandList::copyToTexture(Texture texture, u32 x, u32 y, u32 width, u32 he
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 }
 
-// ---------------------------------------------------------------- GPU 조사
+// ---------------------------------------------------------------- GPU inspection
 
 std::string gpuMinimumError(const GpuInfo& info) { return info.unsupported; }
 

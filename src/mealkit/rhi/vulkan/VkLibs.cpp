@@ -1,4 +1,4 @@
-// 외부 라이브러리 구현 (경고 끔, engine/CMakeLists.txt): volk(로더), VMA(메모리 할당)
+// External library implementations (warnings off, engine/CMakeLists.txt): volk (loader), VMA (memory allocation)
 #include "mealkit/rhi/vulkan/Vk.h"
 
 #include "volk.c"

@@ -1,4 +1,4 @@
-// 디버그 UI(Dear ImGui) Vulkan 그리기 백엔드. 오버레이 뷰(감마 변환 없음)에 dynamic rendering으로 그린다.
+// Debug UI (Dear ImGui) Vulkan drawing backend. Draws into the overlay view (no gamma conversion) with dynamic rendering.
 #include "mealkit/rhi/vulkan/Vk.h"
 
 #include <imgui.h>
@@ -15,7 +15,7 @@ bool imguiInit(Device& device) {
     info.Device = m->device;
     info.QueueFamily = m->queueFamily;
     info.Queue = m->queue;
-    info.DescriptorPoolSize = 64; // 글꼴 + 사용자 텍스처
+    info.DescriptorPoolSize = 64; // fonts + user textures
     info.MinImageCount = 2;
     info.ImageCount = static_cast<u32>(m->swapImages.size());
     info.UseDynamicRendering = true;
@@ -28,8 +28,8 @@ bool imguiInit(Device& device) {
 
 void imguiShutdown(Device& device) {
     device.waitIdle();
-    device.impl()->imguiTextures.clear(); // 서술자 세트는 ImGui 풀과 같이 사라진다
-    ImGui_ImplVulkan_Shutdown(); // 사용자 텍스처의 GPU 자원도 지운다
+    device.impl()->imguiTextures.clear(); // descriptor sets go away with the ImGui pool
+    ImGui_ImplVulkan_Shutdown(); // also frees GPU resources of user textures
 }
 
 void imguiNewFrame() { ImGui_ImplVulkan_NewFrame(); }
@@ -41,7 +41,7 @@ u64 imguiTextureId(Device& device, Texture texture) {
     Device::Impl* m = device.impl();
     for (const auto& [id, set] : m->imguiTextures)
         if (id == texture.id) return set;
-    // ImGui 백엔드의 풀에서 텍스처 하나짜리 세트 (그 뒤로는 같은 값을 돌려준다)
+    // A single-texture set from the ImGui backend's pool (returns the same value after that)
     const VkDescriptorSet set = ImGui_ImplVulkan_AddTexture(m->linearClamp, m->textures[texture.id - 1].view,
                                                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     const u64 value = reinterpret_cast<u64>(set);

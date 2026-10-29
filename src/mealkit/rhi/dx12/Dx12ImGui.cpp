@@ -1,4 +1,4 @@
-// 디버그 UI(Dear ImGui) DX12 그리기 백엔드. 텍스처 서술자는 장치의 bindless 힙 텍스처 칸에서 빌린다.
+// Debug UI (Dear ImGui) DX12 drawing backend. Texture descriptors are borrowed from the texture slots of the device's bindless heap.
 #include "mealkit/rhi/dx12/Dx12.h"
 
 #include <imgui.h>
@@ -38,7 +38,7 @@ bool imguiInit(Device& device) {
 
 void imguiShutdown(Device& device) {
     device.waitIdle();
-    ImGui_ImplDX12_Shutdown(); // 사용자 텍스처의 GPU 자원도 지운다
+    ImGui_ImplDX12_Shutdown(); // also frees GPU resources of user textures
 }
 
 void imguiNewFrame() { ImGui_ImplDX12_NewFrame(); }
@@ -47,7 +47,7 @@ void imguiRender(Device& device) { ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawD
 
 u64 imguiTextureId(Device& device, Texture texture) {
     Device::Impl* m = device.impl();
-    return texture ? m->srvGpu(m->textures[texture.id - 1].slot).ptr : 0; // 같은 bindless 힙 (ImGui 백엔드가 이 힙을 묶는다)
+    return texture ? m->srvGpu(m->textures[texture.id - 1].slot).ptr : 0; // same bindless heap (the ImGui backend binds this heap)
 }
 
 } // namespace mealkit::rhi

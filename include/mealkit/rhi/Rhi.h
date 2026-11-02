@@ -134,6 +134,7 @@ struct DeviceDesc {
     u32 height = 0;
     bool debug = false; // validation layer (DX12 debug layer, Vulkan validation)
     bool gpuCapture = false; // loads RenderDoc/PIX before creating the device (rhi/GpuCapture.h, dev builds)
+    std::string pipelineCache; // folder of the compiled pipelines file (rhi/PipelineCache.h, one per backend), read on init and written on shutdown. Empty = off
 };
 
 // Captured back buffer (RGBA8, in row order). If source is given, reads that offscreen target (TargetKind::Ldr) instead of the back buffer

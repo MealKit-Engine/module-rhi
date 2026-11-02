@@ -1,7 +1,9 @@
 #include "mealkit/rhi/dx12/Dx12.h"
 
 #include "mealkit/core/Log.h"
+#include "mealkit/platform/Paths.h"
 #include "mealkit/rhi/GpuCapture.h"
+#include "mealkit/rhi/PipelineCache.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -423,6 +425,29 @@ bool Device::init(const DeviceDesc& desc) {
 
     m->createRootSignature();
     m->createSwapchainResources();
+    if (!desc.pipelineCache.empty()) {
+        // A file from another driver/GPU or a damaged one fails to open (D3D12_ERROR_DRIVER_VERSION_MISMATCH etc.): start empty
+        ComPtr<ID3D12Device1> device1;
+        if (SUCCEEDED(m->device.As(&device1))) {
+            m->libraryPath = desc.pipelineCache + "/pipelines.dx12";
+            readTextFile(m->libraryPath, m->libraryData);
+            u32 count = 0;
+            if (m->libraryData.size() >= 4) std::memcpy(&count, m->libraryData.data(), 4);
+            const size_t blob = 4 + size_t{count} * 8;
+            if (m->libraryData.size() > blob) {
+                m->libraryKeys.resize(count);
+                std::memcpy(m->libraryKeys.data(), m->libraryData.data() + 4, size_t{count} * 8);
+            }
+            if (m->libraryKeys.empty() || FAILED(device1->CreatePipelineLibrary(m->libraryData.data() + blob, m->libraryData.size() - blob,
+                                                                                IID_PPV_ARGS(&m->library)))) {
+                m->libraryData.clear();
+                m->libraryKeys.clear();
+                m->library.Reset();
+                if (FAILED(device1->CreatePipelineLibrary(nullptr, 0, IID_PPV_ARGS(&m->library)))) m->library.Reset();
+            }
+            if (m->library) createDirectories(desc.pipelineCache);
+        }
+    }
 #if defined(TRACY_ENABLE)
     m->tracyGpu = TracyD3D12Context(m->device.Get(), m->queue.Get());
 #endif
@@ -437,6 +462,15 @@ const std::string& Device::initError() const {
 void Device::shutdown() {
     if (!m) return;
     if (m->queue && m->fence) m->waitIdle();
+    if (m->library && m->libraryDirty) {
+        const u32 count = static_cast<u32>(m->libraryKeys.size());
+        const size_t blob = 4 + size_t{count} * 8;
+        std::string data(blob + m->library->GetSerializedSize(), '\0');
+        std::memcpy(data.data(), &count, 4);
+        std::memcpy(data.data() + 4, m->libraryKeys.data(), size_t{count} * 8);
+        if (SUCCEEDED(m->library->Serialize(data.data() + blob, data.size() - blob)) && !writeTextFile(m->libraryPath, data))
+            MEALKIT_WARN("Cannot write the pipeline cache %s", m->libraryPath.c_str());
+    }
 #if defined(TRACY_ENABLE)
     if (m->tracyGpu) TracyD3D12Destroy(m->tracyGpu);
 #endif
@@ -773,7 +807,18 @@ Pipeline Device::createPipeline(const PipelineDesc& desc) {
     pd.RTVFormats[0] = shadow ? DXGI_FORMAT_UNKNOWN : desc.target == Target::Overlay ? kOverlayFormat : kHdrFormat;
     pd.SampleDesc.Count = 1;
     ComPtr<ID3D12PipelineState> pso;
-    HR(m->device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pso)));
+    wchar_t name[17] = {};
+    const u64 key = m->library ? pipelineKey(desc) : 0;
+    const bool stored = m->library && std::find(m->libraryKeys.begin(), m->libraryKeys.end(), key) != m->libraryKeys.end();
+    if (m->library) swprintf(name, 17, L"%016llx", static_cast<unsigned long long>(key));
+    if (stored && FAILED(m->library->LoadGraphicsPipeline(name, &pd, IID_PPV_ARGS(&pso)))) pso.Reset();
+    if (!pso) {
+        HR(m->device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pso)));
+        if (m->library && !stored && SUCCEEDED(m->library->StorePipeline(name, pso.Get()))) {
+            m->libraryKeys.push_back(key);
+            m->libraryDirty = true;
+        }
+    }
     m->pipelines.push_back(std::move(pso));
     return {static_cast<u32>(m->pipelines.size())};
 }
@@ -781,7 +826,9 @@ Pipeline Device::createPipeline(const PipelineDesc& desc) {
 bool Device::recreatePipeline(Pipeline pipeline, const PipelineDesc& desc) {
     if (!m || m->inFrame || !pipeline || pipeline.id > m->pipelines.size()) return false;
     m->waitIdle();
+    ComPtr<ID3D12PipelineLibrary1> library = std::move(m->library); // hot reload: not cached (the file would only grow)
     createPipeline(desc); // the new one appended at the end goes into the original slot
+    m->library = std::move(library);
     m->pipelines[pipeline.id - 1] = std::move(m->pipelines.back());
     m->pipelines.pop_back();
     return true;

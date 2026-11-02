@@ -36,6 +36,12 @@ struct Device::Impl {
     ComPtr<IDXGIAdapter3> adapter3; // QueryVideoMemoryInfo (GPU memory 0 if absent)
     ComPtr<ID3D12Device> device;
     ComPtr<ID3D12CommandQueue> queue;
+    // Pipeline cache (rhi/PipelineCache.h): libraryData must outlive the library (it reads from that memory).
+    // File = u32 count + the stored keys + the serialized library; only stored keys are loaded (a miss is a debug layer warning)
+    ComPtr<ID3D12PipelineLibrary1> library;
+    std::string libraryData, libraryPath;
+    std::vector<u64> libraryKeys;
+    bool libraryDirty = false;
 
     ComPtr<IDXGISwapChain3> swapchain;
     HANDLE frameLatencyWaitable = nullptr;

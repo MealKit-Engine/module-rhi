@@ -52,6 +52,8 @@ struct Device::Impl {
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
     VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+    VkPipelineCache pipelineCache = VK_NULL_HANDLE; // rhi/PipelineCache.h (null = off or while hot reloading)
+    std::string pipelineCachePath;
     VkSampler linearClamp = VK_NULL_HANDLE;
     VkSampler linearWrap = VK_NULL_HANDLE; // model textures (repeat, anisotropy)
     std::vector<u32> freeTextureSlots;

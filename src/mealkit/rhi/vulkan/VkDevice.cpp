@@ -1,6 +1,7 @@
 #include "mealkit/rhi/vulkan/Vk.h"
 
 #include "mealkit/core/Log.h"
+#include "mealkit/platform/Paths.h"
 #include "mealkit/rhi/GpuCapture.h"
 
 #include <algorithm>
@@ -550,6 +551,26 @@ bool Device::init(const DeviceDesc& desc) {
     pli.pushConstantRangeCount = 1;
     pli.pPushConstantRanges = &push;
     VK(vkCreatePipelineLayout(m->device, &pli, nullptr, &m->pipelineLayout));
+    if (!desc.pipelineCache.empty()) {
+        // The header (VkPipelineCacheHeaderVersionOne) is checked here: some drivers misbehave on data from another GPU/driver
+        m->pipelineCachePath = desc.pipelineCache + "/pipelines.vulkan";
+        std::string data;
+        readTextFile(m->pipelineCachePath, data);
+        u32 header[4] = {};
+        u8 uuid[VK_UUID_SIZE] = {};
+        if (data.size() >= 16 + VK_UUID_SIZE) {
+            std::memcpy(header, data.data(), 16);
+            std::memcpy(uuid, data.data() + 16, VK_UUID_SIZE);
+        }
+        if (header[1] != VK_PIPELINE_CACHE_HEADER_VERSION_ONE || header[2] != m->properties.vendorID || header[3] != m->properties.deviceID ||
+            std::memcmp(uuid, m->properties.pipelineCacheUUID, VK_UUID_SIZE) != 0)
+            data.clear();
+        VkPipelineCacheCreateInfo cci{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+        cci.initialDataSize = data.size();
+        cci.pInitialData = data.empty() ? nullptr : data.data();
+        if (vkCreatePipelineCache(m->device, &cci, nullptr, &m->pipelineCache) != VK_SUCCESS) m->pipelineCache = VK_NULL_HANDLE;
+        if (m->pipelineCache) createDirectories(desc.pipelineCache);
+    }
 
     // Upload ring: one memory block the CPU writes and the GPU reads (GPU memory itself on UMA), g_buffers[0]
     const u64 ringBytes = kUploadBytesPerFrame * kFramesInFlight;
@@ -636,6 +657,18 @@ void Device::shutdown() {
     if (!m) return;
     if (m->device) {
         vkDeviceWaitIdle(m->device);
+        if (m->pipelineCache) {
+            size_t size = 0;
+            std::string data;
+            if (vkGetPipelineCacheData(m->device, m->pipelineCache, &size, nullptr) == VK_SUCCESS && size) {
+                data.resize(size);
+                if (vkGetPipelineCacheData(m->device, m->pipelineCache, &size, data.data()) != VK_SUCCESS) data.clear();
+                data.resize(size);
+            }
+            if (!data.empty() && !writeTextFile(m->pipelineCachePath, data))
+                MEALKIT_WARN("Cannot write the pipeline cache %s", m->pipelineCachePath.c_str());
+            vkDestroyPipelineCache(m->device, m->pipelineCache, nullptr);
+        }
         for (VkPipeline p : m->pipelines) vkDestroyPipeline(m->device, p, nullptr);
         for (Impl::TargetEntry& t : m->targets) { // color images are deleted by textures (and depth too for depth-only targets)
             if (t.depthOnly || !t.depthImage) continue;
@@ -1049,7 +1082,7 @@ Pipeline Device::createPipeline(const PipelineDesc& desc) {
     ci.pDynamicState = &dynamic;
     ci.layout = m->pipelineLayout;
     VkPipeline pipeline = VK_NULL_HANDLE;
-    VK(vkCreateGraphicsPipelines(m->device, VK_NULL_HANDLE, 1, &ci, nullptr, &pipeline));
+    VK(vkCreateGraphicsPipelines(m->device, m->pipelineCache, 1, &ci, nullptr, &pipeline));
     vkDestroyShaderModule(m->device, vs, nullptr);
     vkDestroyShaderModule(m->device, ps, nullptr);
     m->pipelines.push_back(pipeline);
@@ -1059,7 +1092,10 @@ Pipeline Device::createPipeline(const PipelineDesc& desc) {
 bool Device::recreatePipeline(Pipeline pipeline, const PipelineDesc& desc) {
     if (!m || m->inFrame || !pipeline || pipeline.id > m->pipelines.size()) return false;
     vkDeviceWaitIdle(m->device);
+    const VkPipelineCache cache = m->pipelineCache; // hot reload: not cached (the file would only grow)
+    m->pipelineCache = VK_NULL_HANDLE;
     createPipeline(desc); // the new one appended at the end goes into the original slot
+    m->pipelineCache = cache;
     vkDestroyPipeline(m->device, m->pipelines[pipeline.id - 1], nullptr);
     m->pipelines[pipeline.id - 1] = m->pipelines.back();
     m->pipelines.pop_back();

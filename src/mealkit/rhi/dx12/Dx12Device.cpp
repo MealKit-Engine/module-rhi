@@ -768,6 +768,8 @@ Pipeline Device::createPipeline(const PipelineDesc& desc) {
                           : a.format == VertexFormat::Half2  ? DXGI_FORMAT_R16G16_FLOAT
                           : a.format == VertexFormat::Uint16x2 ? DXGI_FORMAT_R16G16_UINT
                           : a.format == VertexFormat::Uint8x4 ? DXGI_FORMAT_R8G8B8A8_UINT
+                          : a.format == VertexFormat::Snorm16x4 ? DXGI_FORMAT_R16G16B16A16_SNORM
+                          : a.format == VertexFormat::Snorm16x2 ? DXGI_FORMAT_R16G16_SNORM
                                                              : DXGI_FORMAT_R8G8B8A8_UNORM, 0,
                           a.offset, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0});
 

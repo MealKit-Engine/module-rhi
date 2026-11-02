@@ -716,6 +716,15 @@ Buffer Device::createBuffer(BufferUsage usage, const void* data, u64 bytes) {
     return {static_cast<u32>(m->buffers.size())};
 }
 
+void Device::destroyBuffer(Buffer buffer) {
+    if (!m || !buffer || buffer.id > m->buffers.size() || m->inFrame) return;
+    Impl::BufferEntry& b = m->buffers[buffer.id - 1];
+    if (!b.buffer) return;
+    vkDeviceWaitIdle(m->device);
+    vmaDestroyBuffer(m->allocator, b.buffer, b.allocation);
+    b = {};
+}
+
 Texture Device::createTexture(u32 width, u32 height, Format format) {
     Impl::TextureEntry entry;
     VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};

@@ -212,6 +212,8 @@ public:
 
     // Static buffer: created in GPU memory with data copied in (at load time, waits for the GPU)
     Buffer createBuffer(BufferUsage usage, const void* data, u64 bytes);
+    // Waits for the GPU and deletes (outside a frame: terrain chunks rebuilt by editor brushes). Handle numbers aren't reused
+    void destroyBuffer(Buffer buffer);
     // Texture read by shaders. Initial state ShaderRead (contents 0)
     Texture createTexture(u32 width, u32 height, Format format);
     // Static texture with mips (model texture cache). State ShaderRead

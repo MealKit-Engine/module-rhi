@@ -3,10 +3,10 @@
 @format module 1
 type engine
 name rhi
-version 0.1.2
+version 0.2.0
 engine 0.9
 kind view
 layer framework
 requires
 tags rhi
-summary Graphics device interface with DX12 and Vulkan backends
+summary Glue for mkrhi (MkRender, third_party/mkrender): mealkit::rhi names, engine log, GPU capture tools
